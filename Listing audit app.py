@@ -98,11 +98,14 @@ def safe_read(file, **kwargs) -> pd.DataFrame:
             st.warning(f"Could not read file: {e}")
             return pd.DataFrame()
 
-def normalize_col(df: pd.DataFrame, candidates: list, new_name: str) -> pd.DataFrame:
+def normalize_col(df: pd.DataFrame, candidates: list, new_name: str):
+    candidates = [str(x).strip().lower() for x in candidates]
+
     for c in df.columns:
-        if c.strip().lower() in [x.lower() for x in candidates]:
+        if str(c).strip().lower() in candidates:
             df = df.rename(columns={c: new_name})
             break
+
     return df
 
 def load_lazada(file) -> pd.DataFrame:

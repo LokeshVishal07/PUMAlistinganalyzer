@@ -173,7 +173,7 @@ def load_zecom(file) -> pd.DataFrame:
                              "ColorNo", "Article Number"], "Article_No")
     # Find marketplace columns
     for mp in ["Lazada", "Shopee", "Zalora"]:
-        cols = [c for c in df.columns if mp.lower() in c.lower()]
+        cols = [c for c in df.columns if mp.lower() in str(c).lower()]
         if cols:
             df.rename(columns={cols[0]: f"Tracker_{mp}"}, inplace=True)
     # Launch date

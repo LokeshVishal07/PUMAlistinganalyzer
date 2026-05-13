@@ -377,41 +377,75 @@ def load_inventory(file, region: str) -> tuple:
 
     excl = {"EAN"}
 
-    # Channel-specific stock columns
-    laz_c = first_col_with(df, ["lazada"],            excl)
-    sho_c = first_col_with(df, ["shopee"],            excl)
-    zal_c = first_col_with(df, ["zalora"],            excl)
-    ttk_c = first_col_with(df, ["tiktok", "tik tok"], excl)
+    # ── PRIMARY: Avail_Qty is the confirmed source-of-truth stock column ──────
+    # Check exact match first, then case-insensitive, then channel-specific,
+    # then generic fallback — in that order.
+    avail_qty_exact = "Avail_Qty" if "Avail_Qty" in df.columns else None
+    avail_qty_ci    = next(
+        (c for c in df.columns if _cl(c) == "avail_qty"), None
+    ) if not avail_qty_exact else avail_qty_exact
 
-    # Fallback: single total/available/SOH column
-    tot_c = first_col_with(df, [
-        "available", "on hand", "onhand", "total", "qty",
+    # Primary stock column = Avail_Qty (any casing)
+    primary_c = avail_qty_exact or avail_qty_ci
+
+    # ── SECONDARY: channel-specific columns (used if present AND Avail_Qty missing) ──
+    laz_c = first_col_with(df, ["lazada"],             excl) if not primary_c else None
+    sho_c = first_col_with(df, ["shopee"],             excl) if not primary_c else None
+    zal_c = first_col_with(df, ["zalora"],             excl) if not primary_c else None
+    ttk_c = first_col_with(df, ["tiktok", "tik tok"],  excl) if not primary_c else None
+
+    # ── TERTIARY: generic total/qty/soh fallback ──────────────────────────────
+    used = {primary_c, laz_c, sho_c, zal_c, ttk_c} - {None}
+    tot_c = None if primary_c else first_col_with(df, [
+        "avail_qty", "available", "on hand", "onhand", "total", "qty",
         "quantity", "stock", "soh", "free", "unrestricted",
-    ], excl | {laz_c, sho_c, zal_c, ttk_c} - {None})
+    ], excl | used)
+
+    # Final resolved column for each channel
+    def resolve(ch_col):
+        """Return the best available stock column for a channel."""
+        if primary_c and primary_c in df.columns:
+            return primary_c          # Avail_Qty wins for every channel
+        if ch_col and ch_col in df.columns:
+            return ch_col             # channel-specific
+        if tot_c and tot_c in df.columns:
+            return tot_c              # generic fallback
+        return None
+
+    laz_src = resolve(laz_c)
+    sho_src = resolve(sho_c)
+    zal_src = resolve(zal_c)
+    ttk_src = resolve(ttk_c)
 
     debug = {
-        "Lazada stock col" : laz_c or f"(not found — using '{tot_c}')",
-        "Shopee stock col" : sho_c or f"(not found — using '{tot_c}')",
-        "Zalora stock col" : zal_c or f"(not found — using '{tot_c}')",
-        "TikTok stock col" : ttk_c or f"(not found — using '{tot_c}')",
-        "Fallback total col": tot_c or "(none — stock will be 0)",
-        "EAN rows loaded"  : len(df),
-        "All columns"      : ", ".join(all_cols[:40]),
+        "PRIMARY stock col (Avail_Qty)" : primary_c or "NOT FOUND",
+        "Lazada  → using col"           : laz_src or "(none — stock = 0)",
+        "Shopee  → using col"           : sho_src or "(none — stock = 0)",
+        "Zalora  → using col"           : zal_src or "(none — stock = 0)",
+        "TikTok  → using col"           : ttk_src or "(none — stock = 0)",
+        "Generic fallback col"          : tot_c or "(not needed / not found)",
+        "EAN rows loaded"               : len(df),
+        "All columns"                   : ", ".join(all_cols[:50]),
     }
 
-    def get_col(c):
-        if c and c in df.columns:
-            return to_num(df[c])
-        if tot_c and tot_c in df.columns:
-            return to_num(df[tot_c])
+    if not primary_c:
+        st.warning(
+            f"[{region}] Inventory: 'Avail_Qty' column NOT found. "
+            f"Columns in file: {all_cols[:30]}. "
+            f"Using fallback: '{tot_c or 'none (stock=0)'}'"
+        )
+
+    def get_stock(src_col):
+        if src_col and src_col in df.columns:
+            return to_num(df[src_col])
         return pd.Series(0, index=df.index)
 
     result = pd.DataFrame({
         "EAN"        : df["EAN"],
-        "Inv_Lazada" : get_col(laz_c),
-        "Inv_Shopee" : get_col(sho_c),
-        "Inv_Zalora" : get_col(zal_c),
-        "Inv_TikTok" : get_col(ttk_c),
+        "Inv_Lazada" : get_stock(laz_src),
+        "Inv_Shopee" : get_stock(sho_src),
+        "Inv_Zalora" : get_stock(zal_src),
+        "Inv_TikTok" : get_stock(ttk_src),
     })
 
     # Apply channel buffer

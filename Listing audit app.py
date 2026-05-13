@@ -545,13 +545,33 @@ def resolve_tracker(val) -> str:
     return "UNKNOWN"
 
 def is_mp_active(val) -> bool:
-    """Marketplace status cell → True if the listing is active."""
+    """
+    Marketplace status → True if ACTIVE.
+    Uses BLACKLIST (safer than whitelist) because each marketplace has its own
+    status vocabulary:
+      Lazada : Active / Inactive / Deleted
+      Shopee : Normal / Banned / Unlist / Deleted / Reviewing / Seller_deleted
+      Zalora : Active / Inactive / Suspended
+      TikTok : Active / Inactive / Reviewing / Delisted / Violation
+    Anything NOT in the blacklist = treated as active.
+    Empty / NaN = inactive (not listed).
+    """
     if pd.isna(val):
         return False
-    return str(val).strip().upper() in {
-        "ACTIVE", "1", "TRUE", "YES", "ENABLED", "PUBLISHED",
-        "LISTED", "NORMAL", "ACTIVATED", "FOR SALE",
+    v = str(val).strip().upper()
+    if v in ("", "NAN", "NONE", "N/A", "-"):
+        return False
+    INACTIVE_STATUSES = {
+        "INACTIVE", "INACTIVATED", "DEACTIVATED",
+        "DELETED", "SELLER_DELETED", "BANNED",
+        "UNLISTED", "UNLIST",
+        "SUSPENDED", "BLOCKED",
+        "VIOLATION", "DELISTED",
+        "REJECTED", "FAILED",
+        "0", "FALSE", "NO", "OFF",
+        "NOT LISTED", "NOT_LISTED",
     }
+    return v not in INACTIVE_STATUSES
 
 def decide_expected_status(
     zecom_row: pd.Series,

@@ -127,8 +127,13 @@ def _s(v) -> str:
     return s if s not in ("nan","None","NaT","") else ""
 
 def _i(v) -> int:
-    try:   return max(0, int(float(v)))
-    except: return 0
+    """Convert any value to non-negative int safely."""
+    try:
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            return 0
+        return max(0, int(float(str(v).strip().replace(",", ""))))
+    except:
+        return 0
 
 def _is_active_status(v) -> bool:
     return str(v).strip().lower() not in INACTIVE_STATUSES
@@ -542,7 +547,7 @@ def run_audit(
             # ── Expected status at article level ───────────────────────────
             def get_expected(ean: str) -> tuple:
                 """Returns (expected_status, reason)"""
-                stock = inv.get(ean, 0)
+                stock = _i(inv.get(ean, 0))   # _i() ensures int, never string
                 eff   = max(0, stock - buf)
 
                 # Special request overrides everything
@@ -609,7 +614,7 @@ def run_audit(
                 mp_st    = mp_row["MP_Status"]
                 mp_stk   = mp_row["MP_Stock"]
                 mp_id    = mp_row.get("MP_ID","")
-                inv_stk  = inv.get(ean, 0)
+                inv_stk  = _i(inv.get(ean, 0))   # ensure int
                 eff_stk  = max(0, inv_stk - buf)
                 exp_stk  = eff_stk
 
@@ -989,7 +994,7 @@ with tab_upload:
                 )
 
     st.markdown("---")
-    run_btn = st.button("🚀 Run Audit", type="primary", use_container_width=True)
+    run_btn = st.button("🚀 Run Audit", type="primary", width='stretch')
 
     if run_btn:
         errors = []
@@ -1047,7 +1052,7 @@ with tab_upload:
                     inv_debug_all[region] = inv_dbg
                     st.write(f"  Inventory: **{len(inv_df):,}** EANs | "
                              f"Column: `{inv_dbg.get('Actual stock col used','?')}` | "
-                             f"In-stock: **{inv_dbg.get('Non-zero',0):,}**")
+                             f"In-stock: **{inv_dbg.get('Non-zero stock EANs',0):,}**")
                 else:
                     st.warning(f"[{region}] No Inventory file — all stock = 0")
 
@@ -1173,7 +1178,7 @@ with tab_results:
                     "Status FAIL":(sv_rm["Result"]=="✗ FAIL").sum(),
                     "Stock FAIL":(stk_rm["Result"]=="✗ FAIL").sum(),
                 })
-        st.dataframe(pd.DataFrame(brows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(brows), width='stretch', hide_index=True)
 
         # Drilldown
         st.markdown("### 🔍 Drilldown")
@@ -1201,7 +1206,7 @@ with tab_results:
         with t1:
             fla = drilldown_filters("la", la)
             st.caption(f"{len(fla):,} records")
-            st.dataframe(fla, use_container_width=True, height=400)
+            st.dataframe(fla, width='stretch', height=400)
 
         with t2:
             fsv = drilldown_filters("sv", sv)
@@ -1210,7 +1215,7 @@ with tab_results:
                                         default=["✓ PASS","✗ FAIL"], key="sv_res")
             fsv = fsv[fsv["Result"].isin(res_filter)]
             st.caption(f"{len(fsv):,} records")
-            st.dataframe(fsv, use_container_width=True, height=400)
+            st.dataframe(fsv, width='stretch', height=400)
 
         with t3:
             fstk = drilldown_filters("stk", stk)
@@ -1218,12 +1223,12 @@ with tab_results:
                                          default=["✓ PASS","✗ FAIL"], key="stk_res")
             fstk = fstk[fstk["Result"].isin(res_filter2)]
             st.caption(f"{len(fstk):,} records")
-            st.dataframe(fstk, use_container_width=True, height=400)
+            st.dataframe(fstk, width='stretch', height=400)
 
         with t4:
             fmv = drilldown_filters("mv", mv)
             st.caption(f"{len(fmv):,} missing variants")
-            st.dataframe(fmv, use_container_width=True, height=400)
+            st.dataframe(fmv, width='stretch', height=400)
 
         # Download
         st.markdown("---")
@@ -1235,7 +1240,7 @@ with tab_results:
             "📥 Download Audit Report (.xlsx)",
             data=xlsx, file_name=fname,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True, type="primary"
+            width='stretch', type="primary"
         )
         st.caption(
             "5-sheet Excel: "
@@ -1252,7 +1257,7 @@ with tab_debug:
             st.markdown(f"**{region}**")
             st.dataframe(
                 pd.DataFrame([{"Field":k,"Value":str(v)} for k,v in info.items()]),
-                use_container_width=True, hide_index=True)
+                width='stretch', hide_index=True)
     else:
         st.info("Run audit first.")
 

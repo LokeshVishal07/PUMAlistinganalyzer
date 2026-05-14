@@ -170,6 +170,68 @@ def to_int(v) -> int:
     try: return max(0, int(float(v)))
     except: return 0
 
+def read_file(file, sheet_name=0, header=0) -> pd.DataFrame:
+    """
+    Universal file reader — handles:
+      Excel  : .xlsx .xls .xlsm .xlsb  (via openpyxl / xlrd)
+      CSV    : .csv
+      TSV    : .tsv
+      ODS    : .ods  (via odfpy if installed, else openpyxl)
+    Always returns a DataFrame with string column names.
+    Falls back gracefully if a sheet name is wrong.
+    """
+    name = getattr(file, "name", "") or ""
+    ext  = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+
+    # ── CSV / TSV ──────────────────────────────────────────────────────────
+    if ext in ("csv", "tsv"):
+        sep = "\t" if ext == "tsv" else ","
+        try:
+            file.seek(0)
+            df = pd.read_csv(file, sep=sep, header=header,
+                             dtype=str, encoding="utf-8", low_memory=False)
+        except UnicodeDecodeError:
+            file.seek(0)
+            df = pd.read_csv(file, sep=sep, header=header,
+                             dtype=str, encoding="latin-1", low_memory=False)
+        df.columns = [str(c).strip() for c in df.columns]
+        return df.dropna(how="all").reset_index(drop=True)
+
+    # ── Excel / ODS ───────────────────────────────────────────────────────
+    engines = []
+    if ext in ("xlsx", "xlsm"):
+        engines = ["openpyxl"]
+    elif ext == "xls":
+        engines = ["xlrd", "openpyxl"]
+    elif ext == "xlsb":
+        engines = ["pyxlsb", "openpyxl"]
+    elif ext == "ods":
+        engines = ["odf", "openpyxl"]
+    else:
+        engines = ["openpyxl", "xlrd"]   # unknown ext — try both
+
+    last_err = None
+    for eng in engines:
+        try:
+            file.seek(0)
+            df = pd.read_excel(file, sheet_name=sheet_name,
+                               header=header, engine=eng)
+            df.columns = [str(c).strip() for c in df.columns]
+            return df.dropna(how="all").reset_index(drop=True)
+        except Exception as e:
+            last_err = e
+            continue
+
+    # Last resort — no engine arg
+    try:
+        file.seek(0)
+        df = pd.read_excel(file, sheet_name=sheet_name, header=header)
+        df.columns = [str(c).strip() for c in df.columns]
+        return df.dropna(how="all").reset_index(drop=True)
+    except Exception as e:
+        st.error(f"Cannot read file '{name}': {e}")
+        return pd.DataFrame()
+
 # ══════════════════════════════════════════════════════════════════════════════
 # FILE LOADERS  — exact column names from real files
 # ══════════════════════════════════════════════════════════════════════════════
@@ -182,10 +244,10 @@ def load_zecom(file) -> pd.DataFrame:
              Tracker_TikTok, Launch_Date
     """
     try:
-        df = pd.read_excel(file, sheet_name="PH", header=2)
+        df = read_file(file, sheet_name="PH", header=2)
     except Exception:
         file.seek(0)
-        df = pd.read_excel(file, header=2)
+        df = read_file(file, header=2)
 
     df.columns = [str(c).strip() for c in df.columns]
 
@@ -232,10 +294,10 @@ def load_content(file) -> pd.DataFrame:
     EAN: "EAN" (int) | Article: "Color_No" | Size: "Size No."
     """
     try:
-        df = pd.read_excel(file, sheet_name="content")
+        df = read_file(file, sheet_name="content")
     except Exception:
         file.seek(0)
-        df = pd.read_excel(file)
+        df = read_file(file)
 
     df.columns = [str(c).strip() for c in df.columns]
     df["EAN"]        = df["EAN"].apply(clean_ean)
@@ -265,10 +327,10 @@ def load_override(file) -> pd.DataFrame:
     is linked/listed on that platform.
     """
     try:
-        df = pd.read_excel(file, sheet_name="Sheet1")
+        df = read_file(file, sheet_name="Sheet1")
     except Exception:
         file.seek(0)
-        df = pd.read_excel(file)
+        df = read_file(file)
 
     df.columns = [str(c).strip() for c in df.columns]
 
@@ -308,7 +370,7 @@ def load_inventory(file, region: str) -> tuple:
     EAN: "EAN" (int64) | Stock: "STOCK Per EAN"
     PH Lazada buffer applied at audit time per channel.
     """
-    df = pd.read_excel(file)
+    df = read_file(file)
     df.columns = [str(c).strip() for c in df.columns]
 
     if "EAN" not in df.columns:
@@ -346,7 +408,7 @@ def load_lazada(file) -> pd.DataFrame:
     Real data starts after 3 instruction rows — filter by numeric SellerSKU.
     EAN: "SellerSKU" | Status: "status" | Stock: "Quantity" | ID: "Product ID"
     """
-    df = pd.read_excel(file, sheet_name="template")
+    df = read_file(file, sheet_name="template")
     df.columns = [str(c).strip() for c in df.columns]
 
     df["EAN"] = df["SellerSKU"].apply(clean_ean)
@@ -370,10 +432,10 @@ def load_shopee(file) -> pd.DataFrame:
     Absence = Not Listed on Shopee.
     """
     try:
-        df = pd.read_excel(file, sheet_name="sheet 1")
+        df = read_file(file, sheet_name="sheet 1")
     except Exception:
         file.seek(0)
-        df = pd.read_excel(file)
+        df = read_file(file)
 
     df.columns = [str(c).strip() for c in df.columns]
 
@@ -394,17 +456,17 @@ def load_zalora(status_file, stock_file) -> pd.DataFrame:
     Stock : sheet "Sheet"           | EAN: "SellerSku" | Stock : "Quantity"
     """
     try:
-        ds = pd.read_excel(status_file, sheet_name="ProductStatuses")
+        ds = read_file(status_file, sheet_name="ProductStatuses")
     except Exception:
         status_file.seek(0)
-        ds = pd.read_excel(status_file)
+        ds = read_file(status_file)
     ds.columns = [str(c).strip() for c in ds.columns]
 
     try:
-        dstk = pd.read_excel(stock_file, sheet_name="Sheet")
+        dstk = read_file(stock_file, sheet_name="Sheet")
     except Exception:
         stock_file.seek(0)
-        dstk = pd.read_excel(stock_file)
+        dstk = read_file(stock_file)
     dstk.columns = [str(c).strip() for c in dstk.columns]
 
     ds["EAN"]   = ds["SellerSku"].apply(clean_ean)  if "SellerSku" in ds.columns   else ""
@@ -422,7 +484,7 @@ def load_zalora(status_file, stock_file) -> pd.DataFrame:
 
 def load_tiktok(file) -> pd.DataFrame:
     """Generic TikTok loader — column names vary."""
-    df = pd.read_excel(file)
+    df = read_file(file)
     df.columns = [str(c).strip() for c in df.columns]
 
     # EAN
@@ -817,17 +879,17 @@ with tab_upload:
     with c1:
         zecom_file = st.file_uploader(
             "📋 ZeCom Tracker **[required]**",
-            type=["xlsx","xls"], key="zecom",
+            type=["xlsx","xls","xlsm","xlsb","csv","tsv","ods"], key="zecom",
             help="PH_MP_eCOM_Tracking_File | Sheet: PH | Header row 2")
     with c2:
         content_file = st.file_uploader(
             "📦 Content Master **[required]**",
-            type=["xlsx","xls"], key="content",
+            type=["xlsx","xls","xlsm","xlsb","csv","tsv","ods"], key="content",
             help="Content_file | Sheet: content | Cols: Color_No, EAN, Size No.")
     with c3:
         override_file = st.file_uploader(
             "⚡ Special Override *(optional)*",
-            type=["xlsx","xls"], key="override",
+            type=["xlsx","xls","xlsm","xlsb","csv","tsv","ods"], key="override",
             help="6_5_Tracker | Cols: Color No, EAN, Lazada Status, Shopee Status, Zalora Status")
 
     st.markdown("### Step 3 — Region Files")
@@ -839,27 +901,27 @@ with tab_upload:
             with c1:
                 region_files[region]["lazada"] = st.file_uploader(
                     f"Lazada ({region}) — pricestock*.xlsx",
-                    type=["xlsx","xls"], key=f"laz_{region}",
+                    type=["xlsx","xls","xlsm","xlsb","csv","tsv","ods"], key=f"laz_{region}",
                     help="Sheet: template | EAN: SellerSKU | Status: status | ID: Product ID")
                 region_files[region]["shopee"] = st.file_uploader(
                     f"Shopee ({region}) — Shopee*Masterfile*.xlsx",
-                    type=["xlsx","xls"], key=f"sho_{region}",
+                    type=["xlsx","xls","xlsm","xlsb","csv","tsv","ods"], key=f"sho_{region}",
                     help="Sheet: sheet 1 | EAN: SKU | Status: Status | ID: Product ID")
                 region_files[region]["tiktok"] = st.file_uploader(
                     f"TikTok ({region}) — TikTokSellerCenter*.xlsx",
-                    type=["xlsx","xls"], key=f"ttk_{region}")
+                    type=["xlsx","xls","xlsm","xlsb","csv","tsv","ods"], key=f"ttk_{region}")
             with c2:
                 region_files[region]["zalora_status"] = st.file_uploader(
                     f"Zalora Status ({region}) — SellerStatusTemplate*.xlsx",
-                    type=["xlsx","xls"], key=f"zst_{region}",
+                    type=["xlsx","xls","xlsm","xlsb","csv","tsv","ods"], key=f"zst_{region}",
                     help="Sheet: ProductStatuses | EAN: SellerSku | Status: Status")
                 region_files[region]["zalora_stock"] = st.file_uploader(
                     f"Zalora Stock ({region}) — SellerStockTemplate*.xlsx",
-                    type=["xlsx","xls"], key=f"zsk_{region}",
+                    type=["xlsx","xls","xlsm","xlsb","csv","tsv","ods"], key=f"zsk_{region}",
                     help="Sheet: Sheet | EAN: SellerSku | Stock: Quantity")
                 region_files[region]["inventory"] = st.file_uploader(
                     f"Inventory ({region}) — Inventory_*.xlsx",
-                    type=["xlsx","xls"], key=f"inv_{region}",
+                    type=["xlsx","xls","xlsm","xlsb","csv","tsv","ods"], key=f"inv_{region}",
                     help="EAN: EAN | Stock: STOCK Per EAN")
 
     st.markdown("---")

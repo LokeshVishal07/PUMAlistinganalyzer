@@ -172,13 +172,10 @@ def to_int(v) -> int:
 
 def read_file(file, sheet_name=0, header=0) -> pd.DataFrame:
     """
-    Universal file reader — handles:
-      Excel  : .xlsx .xls .xlsm .xlsb  (via openpyxl / xlrd)
-      CSV    : .csv
-      TSV    : .tsv
-      ODS    : .ods  (via odfpy if installed, else openpyxl)
-    Always returns a DataFrame with string column names.
-    Falls back gracefully if a sheet name is wrong.
+    Universal file reader — handles xlsx, xls, xlsm, xlsb, csv, tsv, ods.
+    When sheet_name is a string, checks actual sheet names in the file first
+    (case-insensitive, strip spaces) so a wrong-case sheet name never errors.
+    Falls back to first sheet if the named sheet is not found.
     """
     name = getattr(file, "name", "") or ""
     ext  = name.rsplit(".", 1)[-1].lower() if "." in name else ""
@@ -186,46 +183,70 @@ def read_file(file, sheet_name=0, header=0) -> pd.DataFrame:
     # ── CSV / TSV ──────────────────────────────────────────────────────────
     if ext in ("csv", "tsv"):
         sep = "\t" if ext == "tsv" else ","
-        try:
-            file.seek(0)
-            df = pd.read_csv(file, sep=sep, header=header,
-                             dtype=str, encoding="utf-8", low_memory=False)
-        except UnicodeDecodeError:
-            file.seek(0)
-            df = pd.read_csv(file, sep=sep, header=header,
-                             dtype=str, encoding="latin-1", low_memory=False)
-        df.columns = [str(c).strip() for c in df.columns]
-        return df.dropna(how="all").reset_index(drop=True)
+        for enc in ("utf-8", "latin-1", "utf-8-sig"):
+            try:
+                file.seek(0)
+                df = pd.read_csv(file, sep=sep, header=header,
+                                 dtype=str, encoding=enc, low_memory=False)
+                df.columns = [str(c).strip() for c in df.columns]
+                return df.dropna(how="all").reset_index(drop=True)
+            except UnicodeDecodeError:
+                continue
+            except Exception as e:
+                st.error(f"Cannot read CSV '{name}': {e}")
+                return pd.DataFrame()
+        return pd.DataFrame()
 
-    # ── Excel / ODS ───────────────────────────────────────────────────────
-    engines = []
-    if ext in ("xlsx", "xlsm"):
-        engines = ["openpyxl"]
-    elif ext == "xls":
-        engines = ["xlrd", "openpyxl"]
-    elif ext == "xlsb":
-        engines = ["pyxlsb", "openpyxl"]
-    elif ext == "ods":
-        engines = ["odf", "openpyxl"]
-    else:
-        engines = ["openpyxl", "xlrd"]   # unknown ext — try both
+    # ── Excel / ODS — resolve sheet name first ────────────────────────────
+    engines = {
+        "xlsx": ["openpyxl"], "xlsm": ["openpyxl"],
+        "xls":  ["xlrd", "openpyxl"],
+        "xlsb": ["pyxlsb", "openpyxl"],
+        "ods":  ["odf", "openpyxl"],
+    }.get(ext, ["openpyxl", "xlrd"])
 
-    last_err = None
+    # Step 1: resolve the real sheet name using ExcelFile
+    resolved_sheet = sheet_name   # default (int index or already correct string)
+    if isinstance(sheet_name, str):
+        for eng in engines:
+            try:
+                file.seek(0)
+                xf = pd.ExcelFile(file, engine=eng)
+                actual_sheets = xf.sheet_names   # list of real sheet names
+                # Exact match first
+                if sheet_name in actual_sheets:
+                    resolved_sheet = sheet_name
+                    break
+                # Case-insensitive + strip match
+                match = next(
+                    (s for s in actual_sheets
+                     if s.strip().lower() == sheet_name.strip().lower()),
+                    None
+                )
+                if match:
+                    resolved_sheet = match
+                    break
+                # No match — fall back to first sheet
+                resolved_sheet = 0
+                break
+            except Exception:
+                continue
+
+    # Step 2: read with resolved sheet name
     for eng in engines:
         try:
             file.seek(0)
-            df = pd.read_excel(file, sheet_name=sheet_name,
+            df = pd.read_excel(file, sheet_name=resolved_sheet,
                                header=header, engine=eng)
             df.columns = [str(c).strip() for c in df.columns]
             return df.dropna(how="all").reset_index(drop=True)
-        except Exception as e:
-            last_err = e
+        except Exception:
             continue
 
-    # Last resort — no engine arg
+    # Last resort
     try:
         file.seek(0)
-        df = pd.read_excel(file, sheet_name=sheet_name, header=header)
+        df = pd.read_excel(file, sheet_name=resolved_sheet, header=header)
         df.columns = [str(c).strip() for c in df.columns]
         return df.dropna(how="all").reset_index(drop=True)
     except Exception as e:
@@ -426,16 +447,22 @@ def load_lazada(file) -> pd.DataFrame:
 
 def load_shopee(file) -> pd.DataFrame:
     """
-    Sheet: "sheet 1" | Header: 0
+    Sheet: tries "sheet 1", "Sheet1", "Sheet 1", first sheet — whichever exists.
     EAN: "SKU" (int) | Status: "Status" (Active/Inactive) | Stock: "Stock" | ID: "Product ID"
     File contains ALL listings (active + inactive + stock-0).
     Absence = Not Listed on Shopee.
     """
-    try:
-        df = read_file(file, sheet_name="sheet 1")
-    except Exception:
-        file.seek(0)
-        df = read_file(file)
+    # Try known sheet name variants, then fall back to first sheet
+    sheet_candidates = ["sheet 1", "Sheet1", "Sheet 1", "SHEET1", "Masterfile", 0]
+    df = pd.DataFrame()
+    for sh in sheet_candidates:
+        try:
+            file.seek(0)
+            df = read_file(file, sheet_name=sh)
+            if not df.empty:
+                break
+        except Exception:
+            continue
 
     df.columns = [str(c).strip() for c in df.columns]
 

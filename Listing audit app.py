@@ -1,39 +1,83 @@
 """
-PUMA Listing Audit Analyzer  v5.0
+PUMA Listing Audit Analyzer  v6.0
 ===================================
-CONFIRMED RULES (locked):
+Built from actual file inspection. All column names are exact.
 
-ACTIVE — ALL of these must be true:
-  1. ZeCom Tracker = YES
-  2. Launch Date is past (or blank)
-  3. Avail_Qty (inventory) > 0  for that EAN on that channel
+FILE STRUCTURES (confirmed from real files):
+─────────────────────────────────────────────
+ZeCom Tracker  (PH_MP_eCOM_Tracking_File)
+  Sheet     : "PH"  |  Header row: 2
+  Article   : "PIM Article#"   (format: 531103_03)
+  Lazada    : "LAZADA"         values: YES / NO / OFF
+  Shopee    : "SHOPEE"         values: YES / NO / OFF
+  Zalora    : "ZALORA"         values: YES / NO / OFF
+  TikTok    : "TIK TOK"        values: YES / NO / OFF
+  Launch    : "Launch Dates"   (datetime)
 
-INACTIVE — ANY of these:
-  1. ZeCom Tracker = NO or OFF
-  2. Launch Date is in the future
-  3. Avail_Qty (inventory) = 0
+Content File  (Content_file)
+  Sheet     : "content"  |  Header row: 0
+  EAN       : "EAN"            (int64 → str)
+  Article   : "Color_No"       (format: 352634_03)
+  Size      : "Size No."
 
-SPECIAL ARTICLE OVERRIDE:
-  - Uploaded file: Article_No | Status (ACTIVE/INACTIVE) | Marketplace (col C)
-  - If Status = ACTIVE  → active ONLY if Avail_Qty > 0, otherwise INACTIVE
-  - If Status = INACTIVE → always INACTIVE regardless of stock
-  - Marketplace column = which MP the override applies to (blank = all)
+Special Override  (6_5_Tracker_PH_Remarks)
+  Sheet     : "Sheet1"  |  Header row: 0
+  Article   : "Color No"
+  EAN       : "EAN"
+  Lazada ID : "Lazada Status"   ← these are Product IDs, NOT status words
+  Shopee ID : "Shopee Status"   ← Product IDs
+  Zalora ID : "Zalora Status"   ← ShopSku / Config SKU
+  NOTE: This file is an EAN-level override list. EANs in this file
+        should be treated as ACTIVE on that marketplace (if stock > 0).
+        EANs NOT in this file follow normal ZeCom rules.
 
-OUTPUT CATEGORIES per Marketplace per Region:
-  🟢 Active           – ZeCom YES + past launch + stock > 0 + listed on MP as active
-  🔴 Inactive         – ZeCom NO/OFF or future launch or stock=0 (listed or not)
-  🟡 Not Listed - Article Level  – ZeCom ACTIVE but ZERO variants on MP at all
-  🟣 Not Listed - EAN Level      – ZeCom ACTIVE, article partly listed, specific EAN missing
+Inventory  (Inventory_YYYYMMDD)
+  Sheet     : first sheet  |  Header row: 0
+  EAN       : "EAN"            (int64)
+  Stock     : "STOCK Per EAN"  ← confirmed stock column
+  PH Lazada buffer: effective = STOCK Per EAN - 1 (min 0)
+  All other channels: STOCK Per EAN directly
 
-MARKETPLACE EAN IDENTIFIERS (confirmed):
-  Lazada  → SellerSKU    + Product ID
-  Shopee  → SKU          + Item ID / Product ID
-  Zalora  → SellerSku
-  TikTok  → Seller sku
+Lazada  (pricestock*)
+  Sheet     : "template"  |  Header row: 0
+  EAN       : "SellerSKU"      (rows 0-2 are instructions, filter by numeric EAN)
+  Status    : "status"         values: active / inactive
+  Stock     : "Quantity"
+  ID        : "Product ID"
 
-INVENTORY: Avail_Qty column = source of truth for ALL channels
-  PH Lazada: effective = Avail_Qty - 1 (floor 0)
-  All others: Avail_Qty directly
+Shopee  (Shopee*Masterfile*)
+  Sheet     : "sheet 1"  |  Header row: 0
+  EAN       : "SKU"            (int64)
+  Status    : "Status"         values: Active / Inactive
+  Stock     : "Stock"
+  ID        : "Product ID"
+  NOTE: File contains ALL listings (active + inactive + stock-0).
+        Absence = Not Listed.
+
+Zalora Status  (SellerStatusTemplate*)
+  Sheet     : "ProductStatuses"  |  Header row: 0
+  EAN       : "SellerSku"
+  Status    : "Status"           values: active / inactive
+
+Zalora Stock  (SellerStockTemplate*)
+  Sheet     : "Sheet"  |  Header row: 0
+  EAN       : "SellerSku"
+  Stock     : "Quantity"
+
+ACTIVE RULE (ALL must be true):
+  1. ZeCom LAZADA/SHOPEE/ZALORA/TIK TOK = YES
+  2. Launch Dates ≤ today (or blank)
+  3. STOCK Per EAN > 0  (after PH Lazada buffer)
+
+INACTIVE RULE (ANY of these):
+  1. ZeCom = NO or OFF
+  2. Launch Dates > today
+  3. STOCK Per EAN = 0
+
+SPECIAL OVERRIDE (6_5_Tracker file):
+  EAN present in override file → ACTIVE on that marketplace IF stock > 0
+  EAN NOT in override file     → follow ZeCom rules
+  Stock still gated: if stock = 0 → INACTIVE even with override
 """
 
 import streamlit as st
@@ -57,15 +101,13 @@ st.markdown("""
 .metric-value{font-size:1.7rem;font-weight:800;}
 .metric-label{font-size:.75rem;color:#718096;margin-top:.15rem;}
 .cg{color:#276221;}.cr{color:#9c0006;}.co{color:#7b5800;}.cp{color:#4a235a;}
-.dbg{background:#f0fff4;border:1px solid #9ae6b4;border-radius:6px;
-  padding:.5rem .8rem;font-size:.78rem;margin:.3rem 0;font-family:monospace;}
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown("""
 <div class='main-header'>
   <h1>📊 PUMA Listing Audit Analyzer</h1>
-  <p>ZeCom-Driven · Stock-Gated · Article &amp; Variant Level · MY / SG / PH</p>
+  <p>ZeCom-Driven · Stock-Gated · MY / SG / PH · Lazada / Shopee / Zalora / TikTok</p>
 </div>""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -74,42 +116,19 @@ st.markdown("""
 REGIONS      = ["MY", "SG", "PH"]
 MARKETPLACES = ["Lazada", "Shopee", "Zalora", "TikTok"]
 
-CHANNEL_BUFFER = {
-    "PH": {"Lazada": 1, "Shopee": 0, "Zalora": 0, "TikTok": 0},
-    "MY": {"Lazada": 0, "Shopee": 0, "Zalora": 0, "TikTok": 0},
-    "SG": {"Lazada": 0, "Shopee": 0, "Zalora": 0, "TikTok": 0},
-}
+# PH Lazada: effective stock = STOCK Per EAN - 1 (min 0). All others: direct.
+CHANNEL_BUFFER = {"PH": {"Lazada":1,"Shopee":0,"Zalora":0,"TikTok":0},
+                  "MY": {"Lazada":0,"Shopee":0,"Zalora":0,"TikTok":0},
+                  "SG": {"Lazada":0,"Shopee":0,"Zalora":0,"TikTok":0}}
 
-# Confirmed EAN column names per marketplace (priority order)
-MP_EAN_COLS = {
-    "Lazada": ["SellerSKU","Seller SKU","seller_sku","SellerSku","Seller Sku","SKU"],
-    "Shopee": ["SKU","sku","Variation SKU","variation_sku","Model SKU",
-               "Seller SKU","SellerSKU","Item SKU"],
-    "Zalora": ["SellerSku","Seller Sku","SellerSKU","Seller SKU","seller_sku"],
-    "TikTok": ["Seller sku","Seller SKU","SellerSKU","seller_sku","SKU"],
-}
-
-# Marketplace product/item ID column names
-MP_ID_COLS = {
-    "Lazada": ["ItemId","Item Id","item_id","Product ID","ProductId","product_id","ITEM ID"],
-    "Shopee": ["Item ID","ItemId","item_id","Product ID","ProductId",
-               "Item Id","itemid","parent_sku","Parent Item ID"],
-    "Zalora": ["ConfigSku","Config SKU","config_sku","ProductId","Product ID"],
-    "TikTok": ["Product ID","ProductId","product_id","Item ID","ItemId"],
-}
-
-# Known INACTIVE status strings across all marketplaces
-MP_INACTIVE_STATUSES = {
-    "INACTIVE","INACTIVATED","DEACTIVATED",
-    "DELETED","SELLER_DELETED","BANNED",
-    "UNLISTED","UNLIST",
-    "SUSPENDED","BLOCKED",
-    "VIOLATION","DELISTED",
-    "REJECTED","FAILED",
-    "PROHIBITED","TAKEN DOWN",
-    "0","FALSE","NO","OFF",
-    "NOT LISTED","NOT_LISTED",
-    "SOLDOUT","SOLD OUT",
+# Confirmed inactive status values (case-insensitive)
+INACTIVE_SET = {
+    "inactive","inactivated","deactivated",
+    "deleted","seller_deleted","seller deleted","banned","banned by admin",
+    "unlisted","unlist","suspended","blocked",
+    "violation","delisted","rejected","failed",
+    "prohibited","taken down","not listed","not_listed",
+    "no","off","0","false",
 }
 
 CAT_ACTIVE   = "Active"
@@ -117,543 +136,430 @@ CAT_INACTIVE = "Inactive"
 CAT_NL_ART   = "Not Listed - Article Level"
 CAT_NL_EAN   = "Not Listed - EAN Level"
 ALL_CATS     = [CAT_ACTIVE, CAT_INACTIVE, CAT_NL_ART, CAT_NL_EAN]
-
-CAT_STYLE = {
-    CAT_ACTIVE  : {"hdr":"#1e6f39","bg":"#c6efce","fc":"#276221","icon":"🟢"},
-    CAT_INACTIVE: {"hdr":"#9c0006","bg":"#ffc7ce","fc":"#9c0006","icon":"🔴"},
-    CAT_NL_ART  : {"hdr":"#7b5800","bg":"#ffeb9c","fc":"#7b5800","icon":"🟡"},
-    CAT_NL_EAN  : {"hdr":"#4a235a","bg":"#e8d5f5","fc":"#4a235a","icon":"🟣"},
+CAT_STYLE    = {
+    CAT_ACTIVE  :{"hdr":"#1e6f39","bg":"#c6efce","fc":"#276221","icon":"🟢"},
+    CAT_INACTIVE:{"hdr":"#9c0006","bg":"#ffc7ce","fc":"#9c0006","icon":"🔴"},
+    CAT_NL_ART  :{"hdr":"#7b5800","bg":"#ffeb9c","fc":"#7b5800","icon":"🟡"},
+    CAT_NL_EAN  :{"hdr":"#4a235a","bg":"#e8d5f5","fc":"#4a235a","icon":"🟣"},
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# COLUMN HELPERS
+# HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
-def _sc(c) -> str:
-    try:
-        s = str(c).strip()
-        return "" if s in ("nan","None","NaT","") else s
-    except:
-        return ""
+def clean_ean(v) -> str:
+    """Normalize EAN to plain string of digits, strip .0 from int-read floats."""
+    s = str(v).strip().split(".")[0].strip()
+    return s if s not in ("nan","None","") else ""
 
-def _cl(c) -> str:
-    return _sc(c).lower()
-
-def sanitize_cols(df: pd.DataFrame) -> pd.DataFrame:
-    df.columns = [_sc(c) or f"_col_{i}" for i,c in enumerate(df.columns)]
-    return df
-
-def find_header_row(file, max_scan: int = 30) -> int:
-    """Scan first max_scan rows, return the one with most non-empty string cells."""
-    try:
-        prev = pd.read_excel(file, header=None, nrows=max_scan)
-        file.seek(0)
-        best_r, best_s = 0, -1
-        for i, row in prev.iterrows():
-            sc = int(row.dropna().apply(
-                lambda v: isinstance(v,str) and len(v.strip()) > 0
-            ).sum())
-            if sc > best_s:
-                best_s, best_r = sc, int(i)
-        return best_r
-    except:
-        try: file.seek(0)
-        except: pass
-        return 0
-
-def safe_read(file, sheet=0) -> pd.DataFrame:
-    """Read Excel/CSV with auto header detection. Always returns string-column DataFrame."""
-    try:
-        hdr = find_header_row(file)
-        df  = pd.read_excel(file, header=hdr, sheet_name=sheet)
-    except:
-        try:
-            file.seek(0)
-            df = pd.read_excel(file, header=0)
-        except:
-            try:
-                file.seek(0)
-                df = pd.read_csv(file, header=0)
-            except Exception as e:
-                st.warning(f"Cannot read file: {e}")
-                return pd.DataFrame()
-    df = sanitize_cols(df)
-    return df.dropna(how="all").reset_index(drop=True)
-
-def norm_col(df: pd.DataFrame, candidates: list, new_name: str) -> pd.DataFrame:
-    cands = [str(x).strip().lower() for x in candidates]
-    for col in df.columns:
-        if _cl(col) in cands:
-            if col != new_name:
-                df = df.rename(columns={col: new_name})
-            break
-    return df
-
-def first_col_with(df: pd.DataFrame, keywords: list, exclude: set = None) -> str | None:
-    excl = exclude or set()
-    for kw in keywords:
-        for c in df.columns:
-            if kw in _cl(c) and c not in excl:
-                return c
-    return None
-
-def cs(s: pd.Series) -> pd.Series:
-    return s.astype(str).str.strip().str.upper().replace(
-        {"NAN":"","NONE":"","NAT":"","NA":"","<NA>":""}
-    )
-
-def to_num(series: pd.Series) -> pd.Series:
-    return pd.to_numeric(series, errors="coerce").fillna(0).clip(lower=0).astype(int)
+def clean_str(v) -> str:
+    s = str(v).strip()
+    return s if s not in ("nan","None","") else ""
 
 def is_mp_active(val) -> bool:
-    """Blacklist approach — anything not explicitly inactive = active."""
     if pd.isna(val): return False
-    v = str(val).strip().upper()
-    if v in ("","NAN","NONE","N/A","-"): return False
-    return v not in MP_INACTIVE_STATUSES
+    return str(val).strip().lower() not in INACTIVE_SET
 
 def resolve_tracker(val) -> str:
     if pd.isna(val): return "UNKNOWN"
     v = str(val).strip().upper()
-    if v == "YES": return "ACTIVE"
+    if v == "YES":        return "ACTIVE"
     if v in ("NO","OFF"): return "INACTIVE"
     return "UNKNOWN"
 
+def to_int(v) -> int:
+    try: return max(0, int(float(v)))
+    except: return 0
+
 # ══════════════════════════════════════════════════════════════════════════════
-# FILE LOADERS
+# FILE LOADERS  — exact column names from real files
 # ══════════════════════════════════════════════════════════════════════════════
 
 def load_zecom(file) -> pd.DataFrame:
-    df = safe_read(file)
-    df = norm_col(df, [
-        "PIM Article#","PIM Article","Article No","ArticleNo",
-        "Color_No","ColorNo","Color No","Article Number",
-        "Style Number","StyleNo","Style No","Parent SKU",
-    ], "Article_No")
+    """
+    Sheet: "PH" | Header row: 2
+    Keeps all rows where PIM Article# looks like xxx_xx
+    Returns: Article_No, Tracker_Lazada, Tracker_Shopee, Tracker_Zalora,
+             Tracker_TikTok, Launch_Date
+    """
+    try:
+        df = pd.read_excel(file, sheet_name="PH", header=2)
+    except Exception:
+        file.seek(0)
+        df = pd.read_excel(file, header=2)
+
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # Rename confirmed columns
+    rename = {
+        "PIM Article#" : "Article_No",
+        "Launch Dates"  : "Launch_Date",
+        "LAZADA"        : "Tracker_Lazada",
+        "SHOPEE"        : "Tracker_Shopee",
+        "ZALORA"        : "Tracker_Zalora",
+        "TIK TOK"       : "Tracker_TikTok",
+    }
+    df = df.rename(columns=rename)
+
+    # Fallback for Article_No
     if "Article_No" not in df.columns:
-        st.error("❌ ZeCom: Cannot find Article No column.")
-        return pd.DataFrame(columns=["Article_No"])
-    reserved = {"Article_No"}
-    for mp in MARKETPLACES:
-        already = {f"Tracker_{m}" for m in MARKETPLACES}
-        cols = [c for c in df.columns
-                if mp.lower() in _cl(c) and c not in already and c not in reserved]
-        if cols:
-            df = df.rename(columns={cols[0]: f"Tracker_{mp}"})
-    for mp in MARKETPLACES:
-        if f"Tracker_{mp}" not in df.columns:
-            df[f"Tracker_{mp}"] = np.nan
-    skip = reserved | {f"Tracker_{m}" for m in MARKETPLACES}
-    date_cols = [c for c in df.columns
-                 if any(k in _cl(c) for k in ["launch","go live","golive","live date"])
-                 and c not in skip]
-    if date_cols:
-        df = df.rename(columns={date_cols[0]: "Launch_Date"})
-        df["Launch_Date"] = pd.to_datetime(df["Launch_Date"], errors="coerce")
-    else:
+        for c in ["Article#","Syle#","PIM Style"]:
+            if c in df.columns:
+                df = df.rename(columns={c: "Article_No"})
+                break
+
+    # Guarantee tracker cols
+    for col in ["Tracker_Lazada","Tracker_Shopee","Tracker_Zalora","Tracker_TikTok"]:
+        if col not in df.columns:
+            df[col] = np.nan
+    if "Launch_Date" not in df.columns:
         df["Launch_Date"] = pd.NaT
-    df["Article_No"] = cs(df["Article_No"])
-    df = df[df["Article_No"].str.len() > 0].drop_duplicates("Article_No").reset_index(drop=True)
-    return df
+
+    df["Article_No"]  = df["Article_No"].apply(clean_str)
+    df["Launch_Date"] = pd.to_datetime(df["Launch_Date"], errors="coerce")
+
+    # Keep only valid article rows
+    df = df[df["Article_No"].str.match(r'^\S+_\S+$', na=False)]
+    df = df.drop_duplicates("Article_No").reset_index(drop=True)
+
+    needed = ["Article_No","Tracker_Lazada","Tracker_Shopee",
+              "Tracker_Zalora","Tracker_TikTok","Launch_Date"]
+    return df[needed]
+
+
+def load_content(file) -> pd.DataFrame:
+    """
+    Sheet: "content" | Header: 0
+    EAN: "EAN" (int) | Article: "Color_No" | Size: "Size No."
+    """
+    try:
+        df = pd.read_excel(file, sheet_name="content")
+    except Exception:
+        file.seek(0)
+        df = pd.read_excel(file)
+
+    df.columns = [str(c).strip() for c in df.columns]
+    df["EAN"]        = df["EAN"].apply(clean_ean)
+    df["Article_No"] = df["Color_No"].apply(clean_str) if "Color_No" in df.columns else ""
+
+    # Size for variant description
+    if "Size No." in df.columns:
+        df["Size"] = df["Size No."].apply(clean_str)
+    elif "Print Size Code (UK)" in df.columns:
+        df["Size"] = df["Print Size Code (UK)"].apply(clean_str)
+    else:
+        df["Size"] = ""
+
+    df = df[(df["EAN"] != "") & (df["Article_No"] != "")]
+    return df[["EAN","Article_No","Size"]].drop_duplicates("EAN").reset_index(drop=True)
 
 
 def load_override(file) -> pd.DataFrame:
     """
-    Special Article Override.
-    Expected columns: Article_No | Status (ACTIVE/INACTIVE) | Marketplace (optional, col C)
-    If Marketplace blank/missing → applies to ALL marketplaces.
-    Stock check still applies: ACTIVE override needs Avail_Qty > 0 to be active.
+    Sheet: "Sheet1" | Header: 0
+    Cols: Color No | EAN | Lazada Status (ID) | Shopee Status (ID) | Zalora Status (ID)
+
+    These are EAN-level overrides. An EAN present here should be treated as
+    ACTIVE on that marketplace (subject to stock check).
+    Lazada Status / Shopee Status / Zalora Status contain the marketplace
+    PRODUCT IDs (not text status words) — their presence confirms the EAN
+    is linked/listed on that platform.
     """
-    df = safe_read(file)
-    df = norm_col(df, [
-        "PIM Article#","PIM Article","Article No","ArticleNo",
-        "Color_No","ColorNo","Article Number","Style Number",
-    ], "Article_No")
-    df = norm_col(df, ["Status","status","Override Status","Listing Status","Flag"], "Status")
+    try:
+        df = pd.read_excel(file, sheet_name="Sheet1")
+    except Exception:
+        file.seek(0)
+        df = pd.read_excel(file)
 
-    # Marketplace column (3rd column / col C)
-    mp_col_candidates = ["Marketplace","marketplace","Channel","channel","Platform"]
-    mp_col = None
-    for c in df.columns:
-        if _cl(c) in [x.lower() for x in mp_col_candidates]:
-            mp_col = c
-            break
-    # Fallback: use 3rd column if it exists and has MP-like values
-    if not mp_col and len(df.columns) >= 3:
-        third_col = df.columns[2]
-        sample = df[third_col].dropna().astype(str).str.upper().unique()
-        if any(mp.upper() in " ".join(sample) for mp in MARKETPLACES):
-            mp_col = third_col
+    df.columns = [str(c).strip() for c in df.columns]
 
-    if "Article_No" not in df.columns or "Status" not in df.columns:
-        st.warning("⚠️ Special Override: needs Article_No and Status columns.")
-        return pd.DataFrame(columns=["Article_No","Status","Marketplace"])
+    # Normalize
+    df["EAN"]        = df["EAN"].apply(clean_ean) if "EAN" in df.columns else ""
+    df["Article_No"] = df["Color No"].apply(clean_str) if "Color No" in df.columns else ""
 
-    df["Article_No"] = cs(df["Article_No"])
-    df["Status"]     = cs(df["Status"])
-    if mp_col:
-        df["Marketplace"] = df[mp_col].astype(str).str.strip().str.upper()
-        df["Marketplace"] = df["Marketplace"].replace({"NAN":"ALL","NONE":"ALL","":"ALL"})
-    else:
-        df["Marketplace"] = "ALL"
+    # Which marketplaces the EAN is linked to
+    df["Has_Lazada"] = df["Lazada Status"].apply(
+        lambda v: clean_str(v) not in ("","nan","None") if "Lazada Status" in df.columns else False
+    ) if "Lazada Status" in df.columns else False
+    df["Has_Shopee"] = df["Shopee Status"].apply(
+        lambda v: clean_str(v) not in ("","nan","None")
+    ) if "Shopee Status" in df.columns else False
+    df["Has_Zalora"] = df["Zalora Status"].apply(
+        lambda v: clean_str(v) not in ("","nan","None")
+    ) if "Zalora Status" in df.columns else False
 
-    df = df[df["Article_No"].str.len() > 0]
-    df = df[df["Status"].isin(["ACTIVE","INACTIVE"])]
-    return df[["Article_No","Status","Marketplace"]].reset_index(drop=True)
+    # Lazada Product ID
+    df["Lazada_ID"] = df["Lazada Status"].apply(
+        lambda v: clean_str(str(v).split(".")[0])
+    ) if "Lazada Status" in df.columns else ""
+    df["Shopee_ID"] = df["Shopee Status"].apply(
+        lambda v: clean_str(str(v).split(".")[0])
+    ) if "Shopee Status" in df.columns else ""
+    df["Zalora_ID"] = df["Zalora Status"].apply(clean_str) \
+        if "Zalora Status" in df.columns else ""
 
-
-def load_content(file) -> pd.DataFrame:
-    """ONLY for Article_No → EAN mapping. NOT used for active/inactive decisions."""
-    df = safe_read(file)
-    df = norm_col(df, [
-        "EAN","ean","Barcode","barcode","Child SKU","ChildSKU",
-        "Seller SKU","SellerSKU","Item EAN","GTIN","UPC",
-    ], "EAN")
-    df = norm_col(df, [
-        "Color_No","ColorNo","Article No","ArticleNo",
-        "PIM Article#","Article Number","Parent SKU","Color No",
-        "Style Number","StyleNo",
-    ], "Article_No")
-    extra = []
-    for label, keys in [("Size",["size","sz"]),
-                         ("Color",["colour","color"]),
-                         ("Description",["desc","product name","name"])]:
-        col = first_col_with(df, keys, exclude={"EAN","Article_No"})
-        if col:
-            df = df.rename(columns={col: label})
-            extra.append(label)
-    for col in ["EAN","Article_No"]:
-        if col not in df.columns:
-            df[col] = np.nan
-    df["EAN"]        = cs(df["EAN"])
-    df["Article_No"] = cs(df["Article_No"])
-    df = df[(df["EAN"].str.len() > 0) & (df["Article_No"].str.len() > 0)]
-    keep = ["EAN","Article_No"] + [e for e in extra if e in df.columns]
-    return df[keep].drop_duplicates("EAN").reset_index(drop=True)
+    df = df[df["EAN"] != ""].reset_index(drop=True)
+    return df[["EAN","Article_No","Has_Lazada","Has_Shopee","Has_Zalora",
+               "Lazada_ID","Shopee_ID","Zalora_ID"]]
 
 
 def load_inventory(file, region: str) -> tuple:
     """
-    Source of truth for stock.
-    Primary column: Avail_Qty (exact or case-insensitive).
-    Returns (DataFrame[EAN, Inv_Stock], debug_dict).
-    Inv_Stock = Avail_Qty with PH Lazada buffer applied per channel at audit time.
+    Header: 0
+    EAN: "EAN" (int64) | Stock: "STOCK Per EAN"
+    PH Lazada buffer applied at audit time per channel.
     """
-    df = safe_read(file)
-    all_cols = list(df.columns)
-
-    df = norm_col(df, [
-        "EAN","ean","Barcode","barcode","Item EAN","GTIN",
-        "SKU","sku","Item Code","Seller SKU","SellerSKU",
-        "Material","Material Number",
-    ], "EAN")
+    df = pd.read_excel(file)
+    df.columns = [str(c).strip() for c in df.columns]
 
     if "EAN" not in df.columns:
-        st.warning(f"[{region}] Inventory: Cannot find EAN column. Columns: {all_cols[:20]}")
-        return pd.DataFrame(columns=["EAN","Inv_Stock"]), {"Error": "EAN not found"}
+        st.warning(f"[{region}] Inventory: 'EAN' column not found. Cols: {list(df.columns)}")
+        return pd.DataFrame(columns=["EAN","Inv_Stock"]), {}
 
-    df["EAN"] = cs(df["EAN"])
-    df = df[df["EAN"].str.len() > 0]
+    df["EAN"] = df["EAN"].apply(clean_ean)
+    df = df[df["EAN"] != ""]
 
-    # PRIMARY: Avail_Qty (exact → case-insensitive → fallback)
-    avail_col = None
-    if "Avail_Qty" in df.columns:
-        avail_col = "Avail_Qty"
+    # Stock column — "STOCK Per EAN" confirmed
+    if "STOCK Per EAN" in df.columns:
+        stock_col = "STOCK Per EAN"
     else:
-        for c in df.columns:
-            if _cl(c) == "avail_qty":
-                avail_col = c
-                break
-    # Fallback to other known stock column names
-    if not avail_col:
-        avail_col = first_col_with(df, [
-            "avail_qty","available","on hand","onhand","total",
-            "qty","quantity","stock","soh","free","unrestricted",
-        ], exclude={"EAN"})
+        # Fallback scan
+        candidates = ["avail_qty","stock per ean","available","qty","stock","soh","on hand"]
+        stock_col  = next(
+            (c for c in df.columns if any(k in c.lower() for k in candidates)),
+            None
+        )
 
     debug = {
-        "Stock column used": avail_col or "NOT FOUND (stock = 0)",
-        "EAN rows loaded"  : len(df),
-        "All columns"      : ", ".join(all_cols[:50]),
+        "Stock column used": stock_col or "NOT FOUND (stock=0)",
+        "EAN rows"         : len(df),
+        "Non-zero stock"   : int((df[stock_col] > 0).sum()) if stock_col else 0,
     }
 
-    if not avail_col:
-        st.warning(
-            f"[{region}] Inventory: 'Avail_Qty' not found. "
-            f"Stock will be 0. Columns: {all_cols[:20]}"
-        )
-        df["Inv_Stock"] = 0
-    else:
-        df["Inv_Stock"] = to_num(df[avail_col])
-
+    df["Inv_Stock"] = df[stock_col].apply(to_int) if stock_col else 0
     result = df[["EAN","Inv_Stock"]].drop_duplicates("EAN").reset_index(drop=True)
     return result, debug
 
 
-def _load_mp_generic(df: pd.DataFrame, mp: str, extra_id_cols: list) -> pd.DataFrame:
-    """
-    Load a marketplace DataFrame.
-    Returns: EAN, MP_Status, MP_Stock, MP_ID, Marketplace
-    Also preserves raw MP_Status_Raw for debugging.
-    """
-    # EAN
-    df = norm_col(df, MP_EAN_COLS[mp], "EAN")
-
-    # Status — broad list to catch all known MP status column names
-    df = norm_col(df, [
-        "Status","status","ItemStatus","Item Status","Listing Status",
-        "Product Status","Active","Publish","Activation","State","Condition",
-        "listing_status","item_status","product_status",
-    ], "MP_Status")
-
-    # Stock from MP's own file
-    df = norm_col(df, [
-        "Available","Stock","Quantity","available","quantity","Qty",
-        "FreeQty","sellable_quantity","Current Stock","Available Stock",
-        "free qty","stock_quantity","sellable_stock",
-    ], "MP_Stock")
-
-    # Product/Item ID
-    id_found = None
-    for cand in extra_id_cols + MP_ID_COLS.get(mp,[]):
-        for col in df.columns:
-            if _cl(col) == cand.lower().strip():
-                id_found = col
-                break
-        if id_found:
-            break
-    if id_found:
-        df = df.rename(columns={id_found: "MP_ID"})
-    else:
-        df["MP_ID"] = ""
-
-    for col in ["EAN","MP_Status","MP_Stock"]:
-        if col not in df.columns:
-            df[col] = np.nan
-
-    # Keep raw status for debug
-    df["MP_Status_Raw"] = df["MP_Status"].astype(str).str.strip()
-
-    df["EAN"]         = cs(df["EAN"])
-    df["MP_Stock"]    = to_num(df["MP_Stock"])
-    df["MP_ID"]       = df["MP_ID"].astype(str).str.strip().replace({"nan":"","None":""})
-    df["Marketplace"] = mp
-    df = df[df["EAN"].str.len() > 0]
-
-    return df[["EAN","MP_Status","MP_Status_Raw","MP_Stock","MP_ID","Marketplace"]].drop_duplicates("EAN")
-
-
 def load_lazada(file) -> pd.DataFrame:
-    df = safe_read(file)
-    return _load_mp_generic(df, "Lazada", ["ItemId","Item Id","item_id"])
+    """
+    Sheet: "template" | Header: 0
+    Real data starts after 3 instruction rows — filter by numeric SellerSKU.
+    EAN: "SellerSKU" | Status: "status" | Stock: "Quantity" | ID: "Product ID"
+    """
+    df = pd.read_excel(file, sheet_name="template")
+    df.columns = [str(c).strip() for c in df.columns]
+
+    df["EAN"] = df["SellerSKU"].apply(clean_ean)
+    # Filter: only rows where EAN is all-digits (skip instruction rows)
+    df = df[df["EAN"].str.match(r'^\d{8,}$', na=False)].copy()
+
+    df["MP_Status"]     = df["status"].apply(clean_str)    if "status"     in df.columns else "active"
+    df["MP_Stock"]      = df["Quantity"].apply(to_int)     if "Quantity"   in df.columns else 0
+    df["MP_ID"]         = df["Product ID"].apply(lambda v: clean_str(str(v).split(".")[0])) \
+                          if "Product ID" in df.columns else ""
+    df["Marketplace"]   = "Lazada"
+
+    return df[["EAN","MP_Status","MP_Stock","MP_ID","Marketplace"]].drop_duplicates("EAN")
+
 
 def load_shopee(file) -> pd.DataFrame:
     """
-    Shopee Masterfile can have product-level + variation-level rows.
-    The SKU (variation) is what maps to EAN.
-    We try all sheets and pick the one with the most SKU data.
+    Sheet: "sheet 1" | Header: 0
+    EAN: "SKU" (int) | Status: "Status" (Active/Inactive) | Stock: "Stock" | ID: "Product ID"
+    File contains ALL listings (active + inactive + stock-0).
+    Absence = Not Listed on Shopee.
     """
-    # Try reading all sheets, pick the best one
-    best_df = pd.DataFrame()
     try:
-        xf = pd.ExcelFile(file)
-        sheets = xf.sheet_names
-    except:
-        sheets = [0]
-
-    for sh in sheets:
-        try:
-            file.seek(0)
-            hdr = find_header_row(file)
-            file.seek(0)
-            tmp = pd.read_excel(file, header=hdr, sheet_name=sh)
-            tmp = sanitize_cols(tmp)
-            tmp = tmp.dropna(how="all").reset_index(drop=True)
-
-            # Score: how many rows have a plausible EAN/SKU column
-            ean_col_found = any(
-                _cl(c) in [x.lower() for x in MP_EAN_COLS["Shopee"]]
-                for c in tmp.columns
-            )
-            if ean_col_found and len(tmp) > len(best_df):
-                best_df = tmp
-        except:
-            continue
-
-    if best_df.empty:
+        df = pd.read_excel(file, sheet_name="sheet 1")
+    except Exception:
         file.seek(0)
-        best_df = safe_read(file)
+        df = pd.read_excel(file)
 
-    return _load_mp_generic(best_df, "Shopee", ["Item ID","ItemId","itemid","item_id"])
+    df.columns = [str(c).strip() for c in df.columns]
 
-def load_tiktok(file) -> pd.DataFrame:
-    df = safe_read(file)
-    return _load_mp_generic(df, "TikTok", ["Product ID","ProductId","product_id"])
+    df["EAN"]       = df["SKU"].apply(clean_ean)    if "SKU"        in df.columns else ""
+    df["MP_Status"] = df["Status"].apply(clean_str) if "Status"     in df.columns else "Active"
+    df["MP_Stock"]  = df["Stock"].apply(to_int)     if "Stock"      in df.columns else 0
+    df["MP_ID"]     = df["Product ID"].apply(lambda v: clean_str(str(v).split(".")[0])) \
+                      if "Product ID" in df.columns else ""
+    df["Marketplace"] = "Shopee"
+
+    df = df[df["EAN"].str.match(r'^\d{8,}$', na=False)]
+    return df[["EAN","MP_Status","MP_Stock","MP_ID","Marketplace"]].drop_duplicates("EAN")
+
 
 def load_zalora(status_file, stock_file) -> pd.DataFrame:
-    ds   = safe_read(status_file)
-    dstk = safe_read(stock_file)
-    ds   = norm_col(ds,   MP_EAN_COLS["Zalora"], "EAN")
-    ds   = norm_col(ds,   ["Status","status","ItemStatus","Item Status","Active"], "MP_Status")
-    dstk = norm_col(dstk, MP_EAN_COLS["Zalora"], "EAN")
-    dstk = norm_col(dstk, ["Stock","Quantity","Available","Qty","quantity"], "MP_Stock")
-    for col in ["EAN","MP_Status"]:
-        if col not in ds.columns: ds[col] = np.nan
-    if "EAN"      not in dstk.columns: dstk["EAN"]      = np.nan
-    if "MP_Stock" not in dstk.columns: dstk["MP_Stock"]  = np.nan
-    ds["EAN"]         = cs(ds["EAN"])
-    dstk["EAN"]       = cs(dstk["EAN"])
-    ds["MP_Status_Raw"] = ds["MP_Status"].astype(str).str.strip()
-    ds["MP_ID"]         = ""
+    """
+    Status: sheet "ProductStatuses" | EAN: "SellerSku" | Status: "Status" (active/inactive)
+    Stock : sheet "Sheet"           | EAN: "SellerSku" | Stock : "Quantity"
+    """
+    try:
+        ds = pd.read_excel(status_file, sheet_name="ProductStatuses")
+    except Exception:
+        status_file.seek(0)
+        ds = pd.read_excel(status_file)
+    ds.columns = [str(c).strip() for c in ds.columns]
+
+    try:
+        dstk = pd.read_excel(stock_file, sheet_name="Sheet")
+    except Exception:
+        stock_file.seek(0)
+        dstk = pd.read_excel(stock_file)
+    dstk.columns = [str(c).strip() for c in dstk.columns]
+
+    ds["EAN"]   = ds["SellerSku"].apply(clean_ean)  if "SellerSku" in ds.columns   else ""
+    ds["MP_Status"] = ds["Status"].apply(clean_str) if "Status"    in ds.columns   else ""
+    dstk["EAN"]     = dstk["SellerSku"].apply(clean_ean) if "SellerSku" in dstk.columns else ""
+    dstk["MP_Stock"]= dstk["Quantity"].apply(to_int)     if "Quantity"  in dstk.columns else 0
+
     merged = ds.merge(dstk[["EAN","MP_Stock"]].drop_duplicates("EAN"), on="EAN", how="left")
-    merged["MP_Stock"]    = to_num(merged["MP_Stock"])
+    merged["MP_Stock"]    = merged["MP_Stock"].apply(to_int)
+    merged["MP_ID"]       = ""
     merged["Marketplace"] = "Zalora"
-    merged = merged[merged["EAN"].str.len() > 0]
-    return merged[["EAN","MP_Status","MP_Status_Raw","MP_Stock","MP_ID","Marketplace"]].drop_duplicates("EAN")
+    merged = merged[merged["EAN"].str.match(r'^\d{8,}$', na=False)]
+    return merged[["EAN","MP_Status","MP_Stock","MP_ID","Marketplace"]].drop_duplicates("EAN")
+
+
+def load_tiktok(file) -> pd.DataFrame:
+    """Generic TikTok loader — column names vary."""
+    df = pd.read_excel(file)
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # EAN
+    ean_col = next((c for c in df.columns
+                    if c.lower() in ["seller sku","seller_sku","sellersku","sku"]), None)
+    if not ean_col:
+        st.warning("TikTok: Cannot find Seller SKU column.")
+        return pd.DataFrame(columns=["EAN","MP_Status","MP_Stock","MP_ID","Marketplace"])
+
+    df["EAN"] = df[ean_col].apply(clean_ean)
+    df = df[df["EAN"].str.match(r'^\d{8,}$', na=False)].copy()
+
+    status_col = next((c for c in df.columns
+                       if c.lower() in ["status","product status","item status"]), None)
+    stock_col  = next((c for c in df.columns
+                       if c.lower() in ["stock","quantity","available","qty"]), None)
+    id_col     = next((c for c in df.columns
+                       if c.lower() in ["product id","productid","item id"]), None)
+
+    df["MP_Status"]   = df[status_col].apply(clean_str) if status_col else "active"
+    df["MP_Stock"]    = df[stock_col].apply(to_int)     if stock_col  else 0
+    df["MP_ID"]       = df[id_col].apply(lambda v: clean_str(str(v).split(".")[0])) \
+                        if id_col else ""
+    df["Marketplace"] = "TikTok"
+    return df[["EAN","MP_Status","MP_Stock","MP_ID","Marketplace"]].drop_duplicates("EAN")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # STATUS DECISION ENGINE
 # ══════════════════════════════════════════════════════════════════════════════
+MP_TRACKER_COL = {
+    "Lazada": "Tracker_Lazada",
+    "Shopee": "Tracker_Shopee",
+    "Zalora": "Tracker_Zalora",
+    "TikTok": "Tracker_TikTok",
+}
+
 def decide_status(
     zecom_row   : pd.Series,
     mp          : str,
-    inv_stock   : int,          # effective stock (after buffer)
-    override_df : pd.DataFrame, # full override DataFrame
-    art_no      : str,
+    eff_stock   : int,
+    ean         : str,
+    override_idx: dict,   # {EAN → override_row}
 ) -> tuple:
     """
-    Returns (expected_status: 'ACTIVE'|'INACTIVE', reasons: list[str])
+    Returns (expected: 'ACTIVE'|'INACTIVE', reason: str)
 
     PRIORITY:
-      1. Special Override (checks stock too)
-      2. ZeCom Tracker = NO/OFF → INACTIVE
-      3. Launch Date future → INACTIVE
-      4. ZeCom Tracker = YES + stock > 0 → ACTIVE
-      5. ZeCom Tracker = YES + stock = 0 → INACTIVE
+      1. Special Override (EAN in override file for this MP) + stock gate
+      2. ZeCom NO/OFF → INACTIVE
+      3. Future Launch Date → INACTIVE
+      4. ZeCom YES + stock > 0 → ACTIVE
+      5. ZeCom YES + stock = 0 → INACTIVE
       6. Blank tracker → INACTIVE
     """
-    reasons = []
-
-    # ── PRIORITY 1: Special Override ─────────────────────────────────────────
-    if not override_df.empty:
-        # Match article + (marketplace = this MP or ALL)
-        mp_upper = mp.upper()
-        mask = (
-            (override_df["Article_No"] == art_no) &
-            (override_df["Marketplace"].isin([mp_upper, "ALL"]))
-        )
-        match = override_df[mask]
-        if not match.empty:
-            ov_status = match.iloc[0]["Status"]
-            if ov_status == "ACTIVE":
-                if inv_stock > 0:
-                    reasons.append(f"Special Override = ACTIVE + stock {inv_stock} > 0 ✓")
-                    return "ACTIVE", reasons
-                else:
-                    reasons.append(f"Special Override = ACTIVE but stock = 0 → INACTIVE")
-                    return "INACTIVE", reasons
+    # PRIORITY 1: Special Override
+    if ean in override_idx:
+        ov = override_idx[ean]
+        mp_col = f"Has_{mp}"
+        if ov.get(mp_col, False):
+            if eff_stock > 0:
+                return "ACTIVE", f"Special Override: EAN linked on {mp} + stock={eff_stock} ✓"
             else:
-                reasons.append(f"Special Override = INACTIVE")
-                return "INACTIVE", reasons
+                return "INACTIVE", f"Special Override: EAN linked on {mp} but stock=0"
 
-    # ── PRIORITY 2: ZeCom Tracker ─────────────────────────────────────────────
-    t_raw    = zecom_row.get(f"Tracker_{mp}", np.nan)
+    # PRIORITY 2: ZeCom tracker
+    t_col    = MP_TRACKER_COL.get(mp, "")
+    t_raw    = zecom_row.get(t_col, np.nan)
     t_status = resolve_tracker(t_raw)
     t_str    = str(t_raw).strip() if pd.notna(t_raw) else "blank"
 
     if t_status == "INACTIVE":
-        reasons.append(f"ZeCom Tracker = {t_str} (NO/OFF → INACTIVE)")
-        return "INACTIVE", reasons
+        return "INACTIVE", f"ZeCom {mp} = {t_str}"
 
-    # ── PRIORITY 3: Launch Date ───────────────────────────────────────────────
+    # PRIORITY 3: Launch Date
     launch = zecom_row.get("Launch_Date", pd.NaT)
     today  = pd.Timestamp.today().normalize()
     if pd.notna(launch):
-        try:
-            lts = pd.Timestamp(launch).normalize()
-            if lts > today:
-                reasons.append(f"Future Launch Date: {lts.date()}")
-                return "INACTIVE", reasons
-            else:
-                reasons.append(f"Launch Date: {lts.date()} ✓ (past)")
-        except:
-            pass
+        lts = pd.Timestamp(launch).normalize()
+        if lts > today:
+            return "INACTIVE", f"Future Launch Date: {lts.date()}"
 
-    # ── PRIORITY 4 & 5: Tracker YES — gate on stock ───────────────────────────
+    # PRIORITY 4 & 5: Tracker YES → gate on stock
     if t_status == "ACTIVE":
-        if inv_stock > 0:
-            reasons.append(f"ZeCom = YES + Avail_Qty = {inv_stock} > 0 ✓")
-            return "ACTIVE", reasons
+        if eff_stock > 0:
+            return "ACTIVE", f"ZeCom={t_str} + stock={eff_stock} ✓"
         else:
-            reasons.append(f"ZeCom = YES but Avail_Qty = 0 → INACTIVE")
-            return "INACTIVE", reasons
+            return "INACTIVE", f"ZeCom={t_str} but stock=0"
 
-    # ── PRIORITY 6: Blank/Unknown ─────────────────────────────────────────────
-    reasons.append(f"ZeCom Tracker = {t_str} (blank/unknown → INACTIVE)")
-    return "INACTIVE", reasons
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# INVENTORY LOOKUP
-# ══════════════════════════════════════════════════════════════════════════════
-def get_eff_stock(ean: str, mp: str, region: str, inv_idx: dict) -> int:
-    """Return effective stock for this EAN+channel+region (buffer applied)."""
-    row = inv_idx.get(ean)
-    raw = int(row["Inv_Stock"]) if row is not None else 0
-    buf = CHANNEL_BUFFER.get(region, {}).get(mp, 0)
-    return max(0, raw - buf)
-
-def stock_disc(inv_stock: int, mp_stock: int) -> str:
-    if inv_stock > 0 and mp_stock == 0:
-        return f"⚠ Inventory={inv_stock} but MP shows 0"
-    if inv_stock == 0 and mp_stock > 0:
-        return f"⚠ Inventory=0 but MP shows {mp_stock}"
-    return "-"
+    # PRIORITY 6: Blank / unknown
+    return "INACTIVE", f"ZeCom {mp} = {t_str} (blank → INACTIVE)"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # AUDIT ENGINE
 # ══════════════════════════════════════════════════════════════════════════════
-def run_audit(
-    mp_dfs       : dict,
-    inv_df       : pd.DataFrame,
-    zecom_df     : pd.DataFrame,
-    content_df   : pd.DataFrame,
-    override_df  : pd.DataFrame,
-    region       : str,
-) -> dict:
+def run_audit(mp_dfs, inv_df, zecom_df, content_df, override_df, region) -> dict:
 
-    # ── Lookup maps ──────────────────────────────────────────────────────────
+    # ── Build lookups ─────────────────────────────────────────────────────────
     art_to_eans: dict[str,list] = {}
+    ean_to_size: dict[str,str]  = {}
+    ean_to_art : dict[str,str]  = {}
     for _, row in content_df.iterrows():
-        art = str(row["Article_No"]).strip()
-        ean = str(row["EAN"]).strip()
+        art = row["Article_No"]; ean = row["EAN"]; sz = row.get("Size","")
         if art and ean:
             art_to_eans.setdefault(art,[]).append(ean)
+            ean_to_size[ean] = clean_str(sz)
+            ean_to_art[ean]  = art
 
-    extra_cols = [c for c in content_df.columns if c not in ("EAN","Article_No")]
-    ean_meta: dict[str,dict] = {}
-    for _, row in content_df.iterrows():
-        ean = str(row["EAN"]).strip()
-        if ean:
-            ean_meta[ean] = {c: row[c] for c in extra_cols if c in row.index}
-
-    inv_idx: dict[str,pd.Series] = {}
+    # Inventory index: EAN → effective stock per channel
+    inv_idx: dict[str,int] = {}
     if not inv_df.empty:
+        buf = CHANNEL_BUFFER.get(region, {})
         for _, row in inv_df.iterrows():
-            inv_idx[str(row["EAN"]).strip()] = row
+            inv_idx[row["EAN"]] = to_int(row["Inv_Stock"])
+
+    def eff_stock(ean: str, mp: str) -> int:
+        raw = inv_idx.get(ean, 0)
+        return max(0, raw - CHANNEL_BUFFER.get(region,{}).get(mp,0))
+
+    # Override index: EAN → row dict
+    override_idx: dict[str,dict] = {}
+    if not override_df.empty:
+        for _, row in override_df.iterrows():
+            override_idx[row["EAN"]] = row.to_dict()
 
     results = {}
 
     for mp in MARKETPLACES:
         mp_df = mp_dfs.get(mp, pd.DataFrame())
 
+        # MP index: EAN → mp row
         mp_idx: dict[str,pd.Series] = {}
         if not mp_df.empty:
             for _, row in mp_df.iterrows():
-                e = str(row["EAN"]).strip()
-                if e:
-                    mp_idx[e] = row
+                if row["EAN"]:
+                    mp_idx[row["EAN"]] = row
 
         active_rows   = []
         inactive_rows = []
@@ -661,109 +567,94 @@ def run_audit(
         nl_ean_rows   = []
 
         for _, z_row in zecom_df.iterrows():
-            art = str(z_row.get("Article_No","")).strip()
-            if not art:
-                continue
+            art = z_row["Article_No"]
+            if not art: continue
 
-            variants     = art_to_eans.get(art,[])
-            listed_eans  = [e for e in variants if e in mp_idx]
-            n_total      = len(variants)
-            n_listed     = len(listed_eans)
+            variants    = art_to_eans.get(art, [])
+            n_total     = len(variants)
+            n_listed    = sum(1 for e in variants if e in mp_idx)
 
-            # ── No variants in content ────────────────────────────────────────
+            # No variants in content
             if not variants:
-                # Determine status using a dummy stock of 0 (no EAN to check)
-                exp, reasons = decide_status(z_row, mp, 0, override_df, art)
-                base = {
-                    "Region"           : region,
-                    "Marketplace"      : mp,
-                    "Article No"       : art,
-                    "EAN (Seller SKU)" : "-",
-                    "MP ID"            : "-",
-                    "Expected Status"  : exp,
-                    "MP Listed"        : "NO",
-                    "MP Status"        : "-",
-                    "Avail_Qty (Inv)"  : 0,
-                    "MP Stock"         : 0,
-                    "Stock Discrepancy": "-",
-                    "Reason"           : "; ".join(reasons),
-                    "Action Required"  : "-",
-                    "Note"             : "No EAN variants in Content File",
+                stock_0  = eff_stock("", mp)
+                exp, reason = decide_status(z_row, mp, 0, "", override_idx)
+                rec = {
+                    "Region":region,"Marketplace":mp,"Article No":art,
+                    "EAN":"—","Size":"—","MP ID":"—",
+                    "Expected Status":exp,"MP Listed":"NO","MP Status":"—",
+                    "Inventory Stock":0,"MP Stock":0,"Stock Discrepancy":"—",
+                    "Reason":reason,"Action Required":"—",
+                    "Note":"No EAN variants in Content File",
                 }
-                if exp == "INACTIVE":
-                    inactive_rows.append(base)
-                else:
-                    nl_art_rows.append({**base,
-                        "Note":"ACTIVE per ZeCom but NO EAN variants in Content File"})
+                if exp == "INACTIVE": inactive_rows.append(rec)
+                else: nl_art_rows.append(rec)
                 continue
 
-            # ── Process each variant ──────────────────────────────────────────
             for ean in variants:
+                raw_inv   = inv_idx.get(ean, 0)
+                eff       = eff_stock(ean, mp)
+                sz        = ean_to_size.get(ean,"")
                 mp_row    = mp_idx.get(ean)
-                eff_stock = get_eff_stock(ean, mp, region, inv_idx)
-                raw_stock = int(inv_idx[ean]["Inv_Stock"]) if ean in inv_idx else 0
-                meta      = ean_meta.get(ean, {})
-                mp_stock  = int(mp_row["MP_Stock"]) if mp_row is not None else 0
-                mp_id     = str(mp_row["MP_ID"])    if mp_row is not None else "-"
-                mp_status_raw = str(mp_row["MP_Status_Raw"]) if mp_row is not None else "Not Listed"
+                mp_stk    = to_int(mp_row["MP_Stock"]) if mp_row is not None else 0
+                mp_id     = clean_str(mp_row["MP_ID"]) if mp_row is not None else "—"
+                mp_st_raw = clean_str(mp_row["MP_Status"]) if mp_row is not None else "Not Listed"
 
-                exp, reasons = decide_status(z_row, mp, eff_stock, override_df, art)
+                exp, reason = decide_status(z_row, mp, eff, ean, override_idx)
 
-                disc = stock_disc(eff_stock, mp_stock)
+                # Stock discrepancy
+                if eff > 0 and mp_stk == 0 and mp_row is not None:
+                    disc = f"⚠ Inv={eff} but MP shows 0"
+                elif eff == 0 and mp_stk > 0 and mp_row is not None:
+                    disc = f"⚠ Inv=0 but MP shows {mp_stk}"
+                else:
+                    disc = "—"
 
-                base_rec = {
-                    "Region"           : region,
-                    "Marketplace"      : mp,
-                    "Article No"       : art,
-                    "EAN (Seller SKU)" : ean,
-                    **meta,
-                    "MP ID"            : mp_id,
-                    "Expected Status"  : exp,
-                    "MP Listed"        : "YES" if mp_row is not None else "NO",
-                    "MP Status"        : mp_status_raw,
-                    "Avail_Qty (Inv)"  : eff_stock,
-                    "MP Stock"         : mp_stock,
+                rec = {
+                    "Region"          : region,
+                    "Marketplace"     : mp,
+                    "Article No"      : art,
+                    "EAN"             : ean,
+                    "Size"            : sz,
+                    "MP ID"           : mp_id,
+                    "Expected Status" : exp,
+                    "MP Listed"       : "YES" if mp_row is not None else "NO",
+                    "MP Status"       : mp_st_raw,
+                    "Inventory Stock" : eff,
+                    "MP Stock"        : mp_stk,
                     "Stock Discrepancy": disc,
-                    "Reason"           : "; ".join(reasons),
-                    "Action Required"  : "-",
+                    "Reason"          : reason,
+                    "Action Required" : "—",
                 }
 
                 if mp_row is None:
-                    # EAN not on MP at all
+                    # EAN not on MP
                     if exp == "INACTIVE":
-                        base_rec["Action Required"] = "-"
-                        inactive_rows.append(base_rec)
+                        rec["Action Required"] = "—"
+                        inactive_rows.append(rec)
                     else:
-                        # Expected ACTIVE but not listed
                         if n_listed == 0:
-                            base_rec["Action Required"] = "List entire article on MP"
-                            nl_art_rows.append(base_rec)
+                            rec["Note"] = "Entire article missing from MP"
+                            rec["Action Required"] = "List article on MP"
+                            nl_art_rows.append(rec)
                         else:
-                            base_rec["Reason"] += (
-                                f"; {n_listed}/{n_total} variants listed — this EAN/size missing"
-                            )
-                            base_rec["Action Required"] = "Add missing variant/size to listing"
-                            nl_ean_rows.append(base_rec)
+                            rec["Reason"] += f" | {n_listed}/{n_total} variants listed — this size missing"
+                            rec["Action Required"] = "Add missing variant/size"
+                            nl_ean_rows.append(rec)
                 else:
-                    # EAN is on MP
+                    # EAN IS on MP
                     mp_active = is_mp_active(mp_row["MP_Status"])
 
                     if exp == "ACTIVE" and mp_active:
-                        if disc != "-":
-                            base_rec["Action Required"] = "Investigate stock discrepancy"
-                        active_rows.append(base_rec)
-
+                        if disc != "—":
+                            rec["Action Required"] = "Investigate stock discrepancy"
+                        active_rows.append(rec)
                     elif exp == "ACTIVE" and not mp_active:
-                        base_rec["Reason"] += "; MP status is INACTIVE despite ZeCom = ACTIVE"
-                        base_rec["Action Required"] = "Activate listing on MP"
-                        # Goes to inactive (MP currently inactive)
-                        inactive_rows.append(base_rec)
-
-                    elif exp == "INACTIVE":
-                        base_rec["Action Required"] = (
-                            "Delist / deactivate on MP" if mp_active else "-"
-                        )
-                        inactive_rows.append(base_rec)
+                        rec["Reason"] += " | MP shows INACTIVE despite expected ACTIVE"
+                        rec["Action Required"] = "Activate listing on MP"
+                        inactive_rows.append(rec)
+                    else:  # exp == INACTIVE
+                        rec["Action Required"] = "Delist / deactivate on MP" if mp_active else "—"
+                        inactive_rows.append(rec)
 
         results[mp] = {
             CAT_ACTIVE  : pd.DataFrame(active_rows),
@@ -779,115 +670,96 @@ def run_audit(
 # EXCEL EXPORT
 # ══════════════════════════════════════════════════════════════════════════════
 def build_excel(all_results: dict) -> bytes:
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+    out = BytesIO()
+    with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
         wb = writer.book
 
-        def fmt(**kw):
-            d = {"font_name":"Arial","font_size":9,"border":1,
-                 "valign":"vcenter","align":"left"}
+        def f(**kw):
+            d = {"font_name":"Arial","font_size":9,"border":1,"valign":"vcenter","align":"left"}
             d.update(kw)
             return wb.add_format(d)
 
-        ttl  = fmt(bold=True, font_size=13, font_color="#0f3460", border=0)
-        sub  = fmt(italic=True, font_size=8, font_color="#718096", border=0)
-        norm = fmt()
-        date_fmt = fmt()
+        ttl  = f(bold=True, font_size=13, font_color="#0f3460", border=0)
+        sub  = f(italic=True, font_size=8, font_color="#718096", border=0)
+        norm = f()
 
-        def chdr(bg, fc="#ffffff"):
-            return fmt(bold=True, bg_color=bg, font_color=fc,
-                       align="center", text_wrap=True)
-        def cdata(bg, fc="#000000"):
-            return fmt(bg_color=bg, font_color=fc)
+        def chdr(bg):
+            return f(bold=True, bg_color=bg, font_color="#ffffff", align="center", text_wrap=True)
+        def cdata(bg, fc):
+            return f(bg_color=bg, font_color=fc)
 
-        # ── Summary sheet ────────────────────────────────────────────────────
+        # Summary
         ws = wb.add_worksheet("Summary")
         writer.sheets["Summary"] = ws
         ws.set_zoom(90)
-        ws.freeze_panes(5, 2)
-        ws.set_column("A:A", 8)
-        ws.set_column("B:B", 14)
-        ws.set_column("C:F", 30)
+        ws.set_column("A:A", 8); ws.set_column("B:B", 12); ws.set_column("C:F", 32)
         ws.write("A1", "PUMA Listing Audit — Summary", ttl)
         ws.write("A2", f"Generated: {datetime.now().strftime('%d %b %Y  %H:%M')}", sub)
-        ws.write("A3", f"Logic: ZeCom YES + Avail_Qty > 0 + Past Launch = ACTIVE", sub)
+        ws.write("A3",
+            "Active = ZeCom YES + past launch + STOCK Per EAN > 0 + listed active on MP", sub)
 
         r = 4
-        ws.write(r, 0, "Region",      chdr("#0f3460"))
-        ws.write(r, 1, "Marketplace", chdr("#0f3460"))
-        for ci, cat in enumerate(ALL_CATS):
-            ws.write(r, ci+2,
-                     f"{CAT_STYLE[cat]['icon']} {cat}",
+        ws.write(r,0,"Region",     chdr("#0f3460"))
+        ws.write(r,1,"Marketplace",chdr("#0f3460"))
+        for ci,cat in enumerate(ALL_CATS):
+            ws.write(r, ci+2, f"{CAT_STYLE[cat]['icon']} {cat}",
                      chdr(CAT_STYLE[cat]["hdr"]))
-        ws.set_row(r, 35)
-        r += 1
+        ws.set_row(r, 35); r += 1
 
         for region, mp_res in all_results.items():
             for mp in MARKETPLACES:
                 if mp not in mp_res: continue
-                ws.write(r, 0, region, norm)
-                ws.write(r, 1, mp,     norm)
-                for ci, cat in enumerate(ALL_CATS):
+                ws.write(r,0,region,norm); ws.write(r,1,mp,norm)
+                for ci,cat in enumerate(ALL_CATS):
                     cnt = len(mp_res[mp].get(cat, pd.DataFrame()))
-                    ws.write(r, ci+2, cnt, cdata(CAT_STYLE[cat]["bg"],
-                                                   CAT_STYLE[cat]["fc"]))
+                    ws.write(r, ci+2, cnt,
+                             cdata(CAT_STYLE[cat]["bg"], CAT_STYLE[cat]["fc"]))
                 r += 1
 
-        # ── Detail sheets ────────────────────────────────────────────────────
+        # Detail sheets
         for region, mp_res in all_results.items():
             for mp in MARKETPLACES:
                 if mp not in mp_res: continue
                 for cat in ALL_CATS:
-                    df = mp_res[mp].get(cat, pd.DataFrame())
-                    sname = f"{mp[:5]} {region} {cat[:17]}"[:31]
-
-                    ws2 = wb.add_worksheet(sname)
-                    writer.sheets[sname] = ws2
+                    df  = mp_res[mp].get(cat, pd.DataFrame())
+                    sn  = f"{mp[:5]} {region} {cat[:17]}"[:31]
+                    ws2 = wb.add_worksheet(sn)
+                    writer.sheets[sn] = ws2
                     ws2.set_zoom(85)
-
-                    ws2.write(0, 0,
-                              f"{CAT_STYLE[cat]['icon']} {mp} [{region}] — {cat}", ttl)
-                    ws2.write(1, 0, f"Total records: {len(df)}", sub)
+                    ws2.write(0,0, f"{CAT_STYLE[cat]['icon']} {mp} [{region}] — {cat}", ttl)
+                    ws2.write(1,0, f"Records: {len(df)}", sub)
 
                     if df.empty:
-                        ws2.write(2, 0, "No records in this category.", sub)
-                        continue
+                        ws2.write(2,0,"No records in this category.",sub); continue
 
                     hf  = chdr(CAT_STYLE[cat]["hdr"])
                     rfd = cdata(CAT_STYLE[cat]["bg"], CAT_STYLE[cat]["fc"])
+                    hi  = {"Expected Status","Reason","Action Required","Stock Discrepancy"}
 
-                    highlight = {"Expected Status","Reason","Action Required",
-                                 "MP Status","Stock Discrepancy"}
-
-                    for ci, col in enumerate(df.columns):
-                        ws2.write(2, ci, col, hf)
+                    df = df.reset_index(drop=True)
+                    for ci,col in enumerate(df.columns):
+                        ws2.write(2,ci,col,hf)
                         try:
-                            max_w = max(
-                                len(str(col)),
-                                int(df[col].astype(str).str.len().max())
-                            )
-                        except:
-                            max_w = len(str(col))
-                        ws2.set_column(ci, ci, min(max_w + 3, 50))
+                            w = max(len(str(col)),
+                                    int(df[col].astype(str).str.len().max()))
+                        except: w = len(str(col))
+                        ws2.set_column(ci,ci,min(w+3,50))
 
-                    ws2.freeze_panes(3, 0)
+                    ws2.freeze_panes(3,0)
+                    for ri,(_,rec) in enumerate(df.iterrows()):
+                        for ci,col in enumerate(df.columns):
+                            v   = rec[col]
+                            sv  = "" if (isinstance(v,float) and np.isnan(v)) else str(v)
+                            ws2.write(ri+3, ci, sv, rfd if col in hi else norm)
 
-                    for ri, (_, rec) in enumerate(df.iterrows()):
-                        for ci, col in enumerate(df.columns):
-                            val = rec[col]
-                            sv  = "" if (isinstance(val,float) and np.isnan(val)) else str(val)
-                            f   = rfd if col in highlight else norm
-                            ws2.write(ri+3, ci, sv, f)
-
-    return output.getvalue()
+    return out.getvalue()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SESSION STATE
 # ══════════════════════════════════════════════════════════════════════════════
-for key in ("audit_results","inv_debug","mp_debug"):
-    if key not in st.session_state:
-        st.session_state[key] = {}
+for k in ("audit_results","inv_debug","load_summary"):
+    if k not in st.session_state: st.session_state[k] = {}
 
 # ══════════════════════════════════════════════════════════════════════════════
 # UI
@@ -896,73 +768,67 @@ tab_upload, tab_results, tab_debug, tab_help = st.tabs([
     "📁 Upload & Run","📊 Results & Download","🔧 Debug","❓ Help",
 ])
 
-# ════ HELP ════════════════════════════════════════════════════════════════════
+# ─── HELP ────────────────────────────────────────────────────────────────────
 with tab_help:
     st.markdown("""
-## ✅ Active / Inactive Decision Rules (v5.0)
+## ✅ Active / Inactive Logic
 
 | Condition | Result |
 |---|---|
-| ZeCom = YES **AND** past launch **AND** Avail_Qty > 0 | **ACTIVE** |
-| ZeCom = NO or OFF | **INACTIVE** |
-| Launch Date is in the future | **INACTIVE** |
-| ZeCom = YES but Avail_Qty = 0 | **INACTIVE** |
-| Tracker blank / unknown | **INACTIVE** |
+| ZeCom = YES **+** past launch **+** stock > 0 | 🟢 **ACTIVE** |
+| ZeCom = NO or OFF | 🔴 **INACTIVE** |
+| Launch Date is future | 🔴 **INACTIVE** |
+| ZeCom = YES but stock = 0 | 🔴 **INACTIVE** |
+| Tracker blank/unknown | 🔴 **INACTIVE** |
+| ZeCom ACTIVE, zero variants on MP | 🟡 **Not Listed – Article** |
+| ZeCom ACTIVE, article partly listed, EAN missing | 🟣 **Not Listed – EAN** |
 
-### Special Article Override (col C = Marketplace)
-| Override Status | Stock | Result |
+## ⚡ Special Override (6_5_Tracker file)
+- EAN present in file → treated as **ACTIVE** on that marketplace **if stock > 0**
+- Stock = 0 → **INACTIVE** even with override
+- EAN not in file → follows normal ZeCom rules
+
+## 📁 Expected File Names
+| File | Sheet | Key Columns |
 |---|---|---|
-| ACTIVE | Avail_Qty > 0 | **ACTIVE** |
-| ACTIVE | Avail_Qty = 0 | **INACTIVE** (no stock) |
-| INACTIVE | any | **INACTIVE** |
+| ZeCom (PH_MP_eCOM_Tracking_File) | PH | PIM Article#, LAZADA, SHOPEE, ZALORA, TIK TOK, Launch Dates |
+| Content (Content_file) | content | Color_No, EAN, Size No. |
+| Override (6_5_Tracker) | Sheet1 | Color No, EAN, Lazada Status, Shopee Status, Zalora Status |
+| Inventory (Inventory_YYYYMMDD) | first sheet | EAN, STOCK Per EAN |
+| Lazada (pricestock*) | template | SellerSKU, status, Quantity, Product ID |
+| Shopee (Shopee*Masterfile*) | sheet 1 | SKU, Status, Stock, Product ID |
+| Zalora Status (SellerStatusTemplate*) | ProductStatuses | SellerSku, Status |
+| Zalora Stock (SellerStockTemplate*) | Sheet | SellerSku, Quantity |
+| TikTok (TikTokSellerCenter*) | first sheet | Seller sku, Status, Stock, Product ID |
 
-## 📋 Output Categories
-| Icon | Category | Meaning |
-|---|---|---|
-| 🟢 | Active | ZeCom YES + past launch + stock + listed active on MP |
-| 🔴 | Inactive | Any inactive condition, listed or not |
-| 🟡 | Not Listed – Article Level | Should be active, ZERO variants on MP |
-| 🟣 | Not Listed – EAN Level | Should be active, some variants on MP, specific EAN missing |
-
-## 🔑 EAN Column Names (confirmed)
-| MP | EAN Col | ID Col |
-|---|---|---|
-| Lazada | `SellerSKU` | `ItemId` / `Product ID` |
-| Shopee | `SKU` | `Item ID` |
-| Zalora | `SellerSku` | — |
-| TikTok | `Seller sku` | `Product ID` |
-
-## 📦 Inventory
-- Column: **`Avail_Qty`** (primary) — used for ALL channels
-- PH Lazada: effective = Avail_Qty − 1 (min 0)
-- All other channels / regions: Avail_Qty directly
+## 📦 Inventory Stock
+- Column: **STOCK Per EAN**
+- PH Lazada: effective = STOCK Per EAN − 1 (min 0)
+- All other channels/regions: STOCK Per EAN directly
     """)
 
-# ════ UPLOAD ══════════════════════════════════════════════════════════════════
+# ─── UPLOAD ──────────────────────────────────────────────────────────────────
 with tab_upload:
     st.markdown("### Step 1 — Select Regions")
-    selected_regions = st.multiselect("Regions:", REGIONS, default=REGIONS)
+    selected_regions = st.multiselect("Regions:", REGIONS, default=["PH"])
 
     st.markdown("### Step 2 — Master Files *(all regions)*")
-    mc1, mc2, mc3 = st.columns(3)
-    with mc1:
+    c1, c2, c3 = st.columns(3)
+    with c1:
         zecom_file = st.file_uploader(
             "📋 ZeCom Tracker **[required]**",
-            type=["xlsx","xls","csv"], key="zecom",
-            help="Article No | Lazada YES/NO/OFF | Shopee | Zalora | TikTok | Launch Date"
-        )
-    with mc2:
+            type=["xlsx","xls"], key="zecom",
+            help="PH_MP_eCOM_Tracking_File | Sheet: PH | Header row 2")
+    with c2:
         content_file = st.file_uploader(
             "📦 Content Master **[required]**",
-            type=["xlsx","xls","csv"], key="content",
-            help="EAN (variant) ↔ Article No (parent) mapping only"
-        )
-    with mc3:
+            type=["xlsx","xls"], key="content",
+            help="Content_file | Sheet: content | Cols: Color_No, EAN, Size No.")
+    with c3:
         override_file = st.file_uploader(
-            "⚡ Special Article Override *(optional)*",
-            type=["xlsx","xls","csv"], key="override",
-            help="Columns: Article_No | Status (ACTIVE/INACTIVE) | Marketplace (col C, blank=ALL). Stock still checked for ACTIVE."
-        )
+            "⚡ Special Override *(optional)*",
+            type=["xlsx","xls"], key="override",
+            help="6_5_Tracker | Cols: Color No, EAN, Lazada Status, Shopee Status, Zalora Status")
 
     st.markdown("### Step 3 — Region Files")
     region_files: dict = {}
@@ -973,112 +839,105 @@ with tab_upload:
             with c1:
                 region_files[region]["lazada"] = st.file_uploader(
                     f"Lazada ({region}) — pricestock*.xlsx",
-                    type=["xlsx","xls","csv"], key=f"laz_{region}",
-                    help="EAN: SellerSKU | ID: ItemId")
+                    type=["xlsx","xls"], key=f"laz_{region}",
+                    help="Sheet: template | EAN: SellerSKU | Status: status | ID: Product ID")
                 region_files[region]["shopee"] = st.file_uploader(
                     f"Shopee ({region}) — Shopee*Masterfile*.xlsx",
-                    type=["xlsx","xls","csv"], key=f"sho_{region}",
-                    help="EAN: SKU | ID: Item ID")
+                    type=["xlsx","xls"], key=f"sho_{region}",
+                    help="Sheet: sheet 1 | EAN: SKU | Status: Status | ID: Product ID")
                 region_files[region]["tiktok"] = st.file_uploader(
                     f"TikTok ({region}) — TikTokSellerCenter*.xlsx",
-                    type=["xlsx","xls","csv"], key=f"ttk_{region}",
-                    help="EAN: Seller sku | ID: Product ID")
+                    type=["xlsx","xls"], key=f"ttk_{region}")
             with c2:
                 region_files[region]["zalora_status"] = st.file_uploader(
                     f"Zalora Status ({region}) — SellerStatusTemplate*.xlsx",
-                    type=["xlsx","xls","csv"], key=f"zst_{region}",
-                    help="EAN: SellerSku")
+                    type=["xlsx","xls"], key=f"zst_{region}",
+                    help="Sheet: ProductStatuses | EAN: SellerSku | Status: Status")
                 region_files[region]["zalora_stock"] = st.file_uploader(
                     f"Zalora Stock ({region}) — SellerStockTemplate*.xlsx",
-                    type=["xlsx","xls","csv"], key=f"zsk_{region}")
+                    type=["xlsx","xls"], key=f"zsk_{region}",
+                    help="Sheet: Sheet | EAN: SellerSku | Stock: Quantity")
                 region_files[region]["inventory"] = st.file_uploader(
-                    f"Inventory ({region})",
-                    type=["xlsx","xls","csv"], key=f"inv_{region}",
-                    help="Must have: EAN/Barcode column + Avail_Qty column")
+                    f"Inventory ({region}) — Inventory_*.xlsx",
+                    type=["xlsx","xls"], key=f"inv_{region}",
+                    help="EAN: EAN | Stock: STOCK Per EAN")
 
     st.markdown("---")
     run_btn = st.button("🚀 Run Listing Audit", type="primary", use_container_width=True)
 
     if run_btn:
         errs = []
-        if not zecom_file:   errs.append("ZeCom Tracker required.")
-        if not content_file: errs.append("Content Master required.")
+        if not zecom_file:   errs.append("ZeCom Tracker is required.")
+        if not content_file: errs.append("Content Master is required.")
         if not selected_regions: errs.append("Select at least one region.")
         for e in errs: st.error(e)
 
         if not errs:
-            prog = st.progress(0, text="Loading ZeCom…")
+            prog = st.progress(0, text="Starting…")
+            load_summary = {}
 
             with st.spinner("Loading ZeCom Tracker…"):
                 zecom_df = load_zecom(zecom_file)
-            st.success(f"✅ ZeCom: **{len(zecom_df):,}** articles")
+            st.success(f"✅ ZeCom: **{len(zecom_df):,}** articles | "
+                       f"Cols: {list(zecom_df.columns)}")
             prog.progress(10)
 
             with st.spinner("Loading Content Master…"):
                 content_df = load_content(content_file)
-            st.success(
-                f"✅ Content: **{len(content_df):,}** EANs "
-                f"/ **{content_df['Article_No'].nunique():,}** articles"
-            )
+            st.success(f"✅ Content: **{len(content_df):,}** EANs / "
+                       f"**{content_df['Article_No'].nunique():,}** articles")
             prog.progress(20)
 
-            override_df = pd.DataFrame(columns=["Article_No","Status","Marketplace"])
+            override_df = pd.DataFrame(
+                columns=["EAN","Article_No","Has_Lazada","Has_Shopee","Has_Zalora",
+                         "Lazada_ID","Shopee_ID","Zalora_ID"])
             if override_file:
                 with st.spinner("Loading Special Override…"):
                     override_df = load_override(override_file)
-                active_ov   = (override_df["Status"]=="ACTIVE").sum()
-                inactive_ov = (override_df["Status"]=="INACTIVE").sum()
-                st.info(
-                    f"⚡ Override: **{len(override_df):,}** articles "
-                    f"({active_ov} ACTIVE, {inactive_ov} INACTIVE) — stock still checked for ACTIVE"
-                )
+                st.info(f"⚡ Override: **{len(override_df):,}** EANs loaded "
+                        f"(Lazada: {override_df['Has_Lazada'].sum():,} | "
+                        f"Shopee: {override_df['Has_Shopee'].sum():,} | "
+                        f"Zalora: {override_df['Has_Zalora'].sum():,})")
             prog.progress(25)
 
             all_results: dict  = {}
             inv_debug_all: dict = {}
-            mp_debug_all: dict  = {}
-            step_size = max(1, int(70 / len(selected_regions)))
             step = 25
+            step_sz = max(1, int(70/len(selected_regions)))
 
             for region in selected_regions:
                 rf = region_files.get(region, {})
-                st.markdown(f"#### 📂 {region}")
+                st.markdown(f"#### 📂 Region: {region}")
                 mp_dfs: dict = {}
-                mp_dbg: dict = {}
-
-                def load_and_report(name, loader_fn, *args):
-                    with st.spinner(f"[{region}] Loading {name}…"):
-                        result = loader_fn(*args)
-                    n = len(result)
-                    ean_col_ok = "EAN" in result.columns and n > 0
-                    status_vals = (
-                        result["MP_Status_Raw"].value_counts().head(8).to_dict()
-                        if "MP_Status_Raw" in result.columns and n > 0 else {}
-                    )
-                    mp_dbg[name] = {
-                        "rows": n,
-                        "EAN col found": ean_col_ok,
-                        "status values": status_vals,
-                        "columns": list(result.columns),
-                    }
-                    st.write(
-                        f"  {name}: **{n:,}** EANs | "
-                        f"Status values: `{list(status_vals.keys())[:5]}`"
-                    )
-                    return result
 
                 if rf.get("lazada"):
-                    mp_dfs["Lazada"] = load_and_report("Lazada", load_lazada, rf["lazada"])
+                    with st.spinner(f"[{region}] Lazada…"):
+                        tmp = load_lazada(rf["lazada"])
+                    st.write(f"  Lazada: **{len(tmp):,}** EANs | "
+                             f"Status: `{tmp['MP_Status'].value_counts().to_dict()}`")
+                    mp_dfs["Lazada"] = tmp
+
                 if rf.get("shopee"):
-                    mp_dfs["Shopee"] = load_and_report("Shopee", load_shopee, rf["shopee"])
+                    with st.spinner(f"[{region}] Shopee…"):
+                        tmp = load_shopee(rf["shopee"])
+                    st.write(f"  Shopee: **{len(tmp):,}** EANs | "
+                             f"Status: `{tmp['MP_Status'].value_counts().to_dict()}`")
+                    mp_dfs["Shopee"] = tmp
+
                 if rf.get("zalora_status") and rf.get("zalora_stock"):
-                    mp_dfs["Zalora"] = load_and_report(
-                        "Zalora", load_zalora, rf["zalora_status"], rf["zalora_stock"]
-                    )
+                    with st.spinner(f"[{region}] Zalora…"):
+                        tmp = load_zalora(rf["zalora_status"], rf["zalora_stock"])
+                    st.write(f"  Zalora: **{len(tmp):,}** EANs | "
+                             f"Status: `{tmp['MP_Status'].value_counts().to_dict()}`")
+                    mp_dfs["Zalora"] = tmp
                 elif rf.get("zalora_status"):
                     st.warning(f"[{region}] Zalora Stock file missing — skipped")
+
                 if rf.get("tiktok"):
-                    mp_dfs["TikTok"] = load_and_report("TikTok", load_tiktok, rf["tiktok"])
+                    with st.spinner(f"[{region}] TikTok…"):
+                        tmp = load_tiktok(rf["tiktok"])
+                    st.write(f"  TikTok: **{len(tmp):,}** EANs")
+                    mp_dfs["TikTok"] = tmp
 
                 if not mp_dfs:
                     st.warning(f"[{region}] No MP files — skipping.")
@@ -1086,66 +945,59 @@ with tab_upload:
 
                 inv_df = pd.DataFrame(columns=["EAN","Inv_Stock"])
                 if rf.get("inventory"):
-                    with st.spinner(f"[{region}] Loading Inventory…"):
+                    with st.spinner(f"[{region}] Inventory…"):
                         inv_df, inv_dbg = load_inventory(rf["inventory"], region)
                     inv_debug_all[region] = inv_dbg
-                    non_zero = int((inv_df["Inv_Stock"] > 0).sum())
-                    st.write(
-                        f"  Inventory: **{len(inv_df):,}** EANs | "
-                        f"In-stock: **{non_zero:,}** | "
-                        f"Column used: `{inv_dbg.get('Stock column used','?')}`"
-                    )
+                    st.write(f"  Inventory: **{len(inv_df):,}** EANs | "
+                             f"Column: `{inv_dbg.get('Stock column used','?')}` | "
+                             f"Non-zero: **{inv_dbg.get('Non-zero stock',0):,}**")
                 else:
-                    st.warning(f"[{region}] No Inventory file — all stock = 0")
+                    st.warning(f"[{region}] No Inventory — all stock = 0")
 
-                mp_debug_all[region] = mp_dbg
-                prog.progress(step, text=f"[{region}] Running audit…")
-
+                prog.progress(step, text=f"[{region}] Auditing…")
                 with st.spinner(f"[{region}] Running audit…"):
                     region_result = run_audit(
                         mp_dfs, inv_df, zecom_df, content_df, override_df, region
                     )
                 all_results[region] = region_result
 
-                summary_line = "  |  ".join(
-                    f"{CAT_STYLE[c]['icon']} {c}: **"
-                    f"{sum(len(region_result[mp].get(c,pd.DataFrame())) for mp in MARKETPLACES if mp in region_result):,}**"
-                    for c in ALL_CATS
-                )
-                st.success(f"✅ [{region}] Done — {summary_line}")
-                step = min(step + step_size, 95)
+                for mp in MARKETPLACES:
+                    if mp in region_result:
+                        for cat in ALL_CATS:
+                            n = len(region_result[mp].get(cat, pd.DataFrame()))
+                            st.write(f"  {CAT_STYLE[cat]['icon']} {mp} {cat}: **{n:,}**")
 
-            prog.progress(100, text="Complete!")
+                step = min(step+step_sz, 95)
+
+            prog.progress(100, text="Done!")
             st.session_state.audit_results = all_results
             st.session_state.inv_debug     = inv_debug_all
-            st.session_state.mp_debug      = mp_debug_all
             if all_results:
-                st.success("🎉 Done! Go to **📊 Results & Download** tab.")
+                st.success("🎉 Audit complete! Go to 📊 Results & Download tab.")
 
-# ════ RESULTS ═════════════════════════════════════════════════════════════════
+# ─── RESULTS ─────────────────────────────────────────────────────────────────
 with tab_results:
     results = st.session_state.audit_results
     if not results:
         st.info("Run the audit first.")
     else:
-        # KPIs
-        st.markdown("### 📊 Overall")
-        grand = {cat:0 for cat in ALL_CATS}
+        grand = {c:0 for c in ALL_CATS}
         for mp_res in results.values():
             for cats in mp_res.values():
-                for cat in ALL_CATS:
-                    grand[cat] += len(cats.get(cat, pd.DataFrame()))
-        css_map = {CAT_ACTIVE:"cg",CAT_INACTIVE:"cr",CAT_NL_ART:"co",CAT_NL_EAN:"cp"}
+                for c in ALL_CATS:
+                    grand[c] += len(cats.get(c, pd.DataFrame()))
+
+        st.markdown("### 📊 Overall")
+        css = {CAT_ACTIVE:"cg",CAT_INACTIVE:"cr",CAT_NL_ART:"co",CAT_NL_EAN:"cp"}
         kcols = st.columns(4)
-        for i, cat in enumerate(ALL_CATS):
+        for i,cat in enumerate(ALL_CATS):
             kcols[i].markdown(
                 f"<div class='metric-box'>"
-                f"<div class='metric-value {css_map[cat]}'>{grand[cat]:,}</div>"
+                f"<div class='metric-value {css[cat]}'>{grand[cat]:,}</div>"
                 f"<div class='metric-label'>{CAT_STYLE[cat]['icon']} {cat}</div>"
                 f"</div>", unsafe_allow_html=True)
 
-        # Summary table
-        st.markdown("### 📋 Region × Marketplace Breakdown")
+        st.markdown("### 📋 Breakdown")
         rows = []
         for region, mp_res in results.items():
             for mp in MARKETPLACES:
@@ -1153,83 +1005,52 @@ with tab_results:
                 row = {"Region":region,"Marketplace":mp}
                 for cat in ALL_CATS:
                     row[f"{CAT_STYLE[cat]['icon']} {cat}"] = len(
-                        mp_res[mp].get(cat, pd.DataFrame()))
+                        mp_res[mp].get(cat,pd.DataFrame()))
                 rows.append(row)
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-        # Drilldown
         st.markdown("### 🔍 Drilldown")
         d1,d2,d3 = st.columns(3)
         dr_region = d1.selectbox("Region",      list(results.keys()))
-        dr_mp     = d2.selectbox("Marketplace", [
-            mp for mp in MARKETPLACES if mp in results.get(dr_region,{})])
+        dr_mp     = d2.selectbox("Marketplace", [m for m in MARKETPLACES
+                                                  if m in results.get(dr_region,{})])
         dr_cat    = d3.selectbox("Category",    ALL_CATS)
-
-        df_view = results[dr_region].get(dr_mp,{}).get(dr_cat, pd.DataFrame())
-        st.markdown(
-            f"**{CAT_STYLE[dr_cat]['icon']} {dr_mp} [{dr_region}] "
-            f"— {dr_cat}: {len(df_view):,} records**"
-        )
+        df_view   = results[dr_region].get(dr_mp,{}).get(dr_cat, pd.DataFrame())
+        st.markdown(f"**{CAT_STYLE[dr_cat]['icon']} {dr_mp} [{dr_region}] "
+                    f"— {dr_cat}: {len(df_view):,} records**")
         if not df_view.empty:
             search = st.text_input("🔎 Filter by Article No / EAN", "")
             if search.strip():
                 mask = pd.Series(False, index=df_view.index)
-                for col in ["Article No","EAN (Seller SKU)"]:
+                for col in ["Article No","EAN"]:
                     if col in df_view.columns:
                         mask |= df_view[col].astype(str).str.contains(
                             search.strip(), case=False, na=False)
                 df_view = df_view[mask]
-                st.caption(f"{len(df_view):,} filtered records")
+                st.caption(f"{len(df_view):,} filtered")
             st.dataframe(df_view, use_container_width=True, height=450)
         else:
-            st.success("✅ No records in this category.")
+            st.success("✅ No records.")
 
-        # Download
         st.markdown("---")
-        st.markdown("### 💾 Download")
         with st.spinner("Building Excel…"):
             xlsx = build_excel(results)
         fname = f"PUMA_Audit_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
         st.download_button(
-            "📥 Download Full Audit Report (.xlsx)",
-            data=xlsx, file_name=fname,
+            "📥 Download Audit Report (.xlsx)", data=xlsx, file_name=fname,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True, type="primary"
-        )
-        st.caption(
-            "Sheets: Summary + one tab per MP × Region × Category | "
-            "Columns include MP ID (Lazada ItemId / Shopee Item ID)"
-        )
+            use_container_width=True, type="primary")
+        st.caption("Sheets: Summary + one tab per MP × Region × Category")
 
-# ════ DEBUG ═══════════════════════════════════════════════════════════════════
+# ─── DEBUG ───────────────────────────────────────────────────────────────────
 with tab_debug:
     st.markdown("### 🔧 Inventory Debug")
-    inv_debug = st.session_state.inv_debug
-    if inv_debug:
-        for region, dbg in inv_debug.items():
+    dbg = st.session_state.inv_debug
+    if dbg:
+        for region, info in dbg.items():
             st.markdown(f"**{region}**")
-            st.dataframe(
-                pd.DataFrame([{"Field":k,"Value":str(v)} for k,v in dbg.items()]),
-                use_container_width=True, hide_index=True)
-    else:
-        st.info("Run audit first.")
-
-    st.markdown("---")
-    st.markdown("### 🔧 Marketplace File Debug")
-    st.markdown("""
-Use this to diagnose why records may not appear in Active/Inactive.
-Check that:
-1. EAN column was found ✓
-2. Status values match expected (see actual values below)
-3. If status values are unusual, they will be treated as ACTIVE (blacklist logic)
-    """)
-    mp_debug = st.session_state.mp_debug
-    if mp_debug:
-        for region, mp_dbg in mp_debug.items():
-            st.markdown(f"**{region}**")
-            for mp, info in mp_dbg.items():
-                with st.expander(f"{mp} — {info['rows']:,} rows | EAN found: {info['EAN col found']}"):
-                    st.write(f"**Columns:** {info['columns']}")
-                    st.write(f"**Status values (top 8):** {info['status values']}")
+            st.dataframe(pd.DataFrame([{"Field":k,"Value":str(v)}
+                                        for k,v in info.items()]),
+                         use_container_width=True, hide_index=True)
     else:
         st.info("Run audit first.")

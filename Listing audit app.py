@@ -169,6 +169,7 @@ def read_file(file, sheet_name=0, header=0) -> pd.DataFrame:
                 df = pd.read_csv(file, sep=sep, header=header,
                                  dtype=str, encoding=enc, low_memory=False)
                 df.columns = [str(c).strip() for c in df.columns]
+                df = df.astype(object)
                 return df.dropna(how="all").reset_index(drop=True)
             except UnicodeDecodeError:
                 continue
@@ -187,6 +188,7 @@ def read_file(file, sheet_name=0, header=0) -> pd.DataFrame:
             df = pd.read_excel(file, sheet_name=sheet_name,
                                header=header, engine=eng)
             df.columns = [str(c).strip() for c in df.columns]
+            df = df.astype(object)
             return df.dropna(how="all").reset_index(drop=True)
         except Exception:
             continue
@@ -194,6 +196,7 @@ def read_file(file, sheet_name=0, header=0) -> pd.DataFrame:
         file.seek(0)
         df = pd.read_excel(file, sheet_name=sheet_name, header=header)
         df.columns = [str(c).strip() for c in df.columns]
+        df = df.astype(object)
         return df.dropna(how="all").reset_index(drop=True)
     except Exception as e:
         st.error(f"Cannot read '{name}': {e}")
@@ -1239,8 +1242,7 @@ with tab_results:
         st.download_button(
             "📥 Download Audit Report (.xlsx)",
             data=xlsx, file_name=fname,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            width='stretch', type="primary"
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width='stretch', type="primary"
         )
         st.caption(
             "5-sheet Excel: "
@@ -1256,8 +1258,7 @@ with tab_debug:
         for region, info in dbg.items():
             st.markdown(f"**{region}**")
             st.dataframe(
-                pd.DataFrame([{"Field":k,"Value":str(v)} for k,v in info.items()]),
-                width='stretch', hide_index=True)
+                pd.DataFrame([{"Field":k,"Value":str(v)} for k,v in info.items()]), width='stretch', hide_index=True)
     else:
         st.info("Run audit first.")
 

@@ -388,6 +388,12 @@ def load_inventory(file, region: str) -> tuple:
                 f"Expected: '{primary}'. Columns in file: {all_cols}"
             )
 
+    # Convert stock column to numeric FIRST — avoids TypeError on string dtype comparison
+    if stock_col and stock_col in df.columns:
+        df["Inv_Stock"] = pd.to_numeric(df[stock_col], errors="coerce").fillna(0).clip(lower=0).astype(int)
+    else:
+        df["Inv_Stock"] = 0
+
     debug = {
         "Region"               : region,
         "Filename"             : filename,
@@ -395,11 +401,10 @@ def load_inventory(file, region: str) -> tuple:
         "Expected stock col"   : primary,
         "Actual stock col used": stock_col or "NOT FOUND (stock=0)",
         "EAN rows"             : len(df),
-        "Non-zero stock EANs"  : int((df[stock_col] > 0).sum()) if stock_col else 0,
+        "Non-zero stock EANs"  : int((df["Inv_Stock"] > 0).sum()),
         "All columns"          : ", ".join(all_cols),
     }
 
-    df["Inv_Stock"] = df[stock_col].apply(_i) if stock_col else 0
     result = df[["EAN","Inv_Stock"]].drop_duplicates("EAN").reset_index(drop=True)
     return result, debug
 

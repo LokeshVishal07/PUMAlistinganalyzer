@@ -66,6 +66,13 @@ st.markdown("""
 # ══════════════════════════════════════════════════════════════════════════════
 REGIONS      = ["PH", "MY", "SG"]
 MARKETPLACES = ["Lazada", "Shopee", "Zalora", "TikTok"]
+
+# TikTok is ONLY managed on MY — excluded from PH and SG
+REGION_MARKETPLACES = {
+    "PH": ["Lazada", "Shopee", "Zalora"],
+    "MY": ["Lazada", "Shopee", "Zalora", "TikTok"],
+    "SG": ["Lazada", "Shopee", "Zalora"],
+}
 TODAY        = pd.Timestamp.today().normalize()
 FUTURE_WINDOW = TODAY + pd.Timedelta(days=30)
 
@@ -296,26 +303,67 @@ def load_zecom(file) -> pd.DataFrame:
 # ── Special Request File ──────────────────────────────────────────────────────
 def load_special_request(file) -> pd.DataFrame:
     """
-    Per-region. Cols: Article_No | Marketplace | Status (Active/Inactive).
-    Status=Inactive → always INACTIVE (overrides everything).
-    Status=Active   → ACTIVE only if stock > 0.
+    New format:
+      Col A: Article No
+      Col B: Active On   → marketplace(s) where article should be ACTIVE
+      Col C: Inactive On → marketplace(s) where article should be INACTIVE
+
+    Multiple marketplaces separated by "/" in a cell (e.g. "Lazada / Shopee").
+    Active On  → ACTIVE if stock > 0, else INACTIVE
+    Inactive On → always INACTIVE regardless of stock/tracker
+
+    Returns long-format DataFrame:
+      Article_No | Marketplace | Status (ACTIVE | INACTIVE)
     """
     df = read_file(file)
+
+    # Normalize article column
     df = norm_col(df, ["Article No","ArticleNo","Color_No","PIM Article#",
                         "Color No","Style Number"], "Article_No")
-    df = norm_col(df, ["Marketplace","marketplace","Channel","Platform"], "Marketplace")
-    df = norm_col(df, ["Status","status","Override","Flag"], "Status")
 
-    for col in ["Article_No","Marketplace","Status"]:
+    # Normalize Active On / Inactive On columns
+    df = norm_col(df, ["Active On","Active on","active_on","Active","ActiveOn"], "Active_On")
+    df = norm_col(df, ["Inactive On","Inactive on","inactive_on","Inactive","InactiveOn"], "Inactive_On")
+
+    if "Article_No" not in df.columns:
+        st.warning("Special Request: Cannot find Article No column.")
+        return pd.DataFrame(columns=["Article_No","Marketplace","Status"])
+
+    for col in ["Active_On","Inactive_On"]:
         if col not in df.columns:
             df[col] = ""
 
     df["Article_No"] = df["Article_No"].apply(_s)
-    df["Marketplace"]= df["Marketplace"].apply(_s).str.upper()
-    df["Status"]     = df["Status"].apply(_s).str.upper()
-    df = df[df["Article_No"] != ""]
-    df = df[df["Status"].isin(["ACTIVE","INACTIVE"])]
-    return df[["Article_No","Marketplace","Status"]].reset_index(drop=True)
+    df = df[df["Article_No"] != ""].reset_index(drop=True)
+
+    def parse_mp_cell(val) -> list:
+        """Split 'Lazada / Shopee' → ['LAZADA', 'SHOPEE']. Handles / and comma."""
+        if not val or _s(str(val)) == "":
+            return []
+        import re
+        parts = re.split(r"[/,]", str(val))
+        return [p.strip().upper() for p in parts if p.strip()]
+
+    # Expand into long format rows
+    rows = []
+    for _, row in df.iterrows():
+        art         = row["Article_No"]
+        active_mps  = parse_mp_cell(row.get("Active_On",""))
+        inactive_mps= parse_mp_cell(row.get("Inactive_On",""))
+
+        for mp in active_mps:
+            rows.append({"Article_No": art, "Marketplace": mp, "Status": "ACTIVE"})
+        for mp in inactive_mps:
+            rows.append({"Article_No": art, "Marketplace": mp, "Status": "INACTIVE"})
+
+    if not rows:
+        return pd.DataFrame(columns=["Article_No","Marketplace","Status"])
+
+    result = pd.DataFrame(rows)
+    # INACTIVE takes priority if same article+MP appears in both columns
+    result = result.sort_values("Status", ascending=True)  # ACTIVE < INACTIVE alphabetically
+    result = result.drop_duplicates(subset=["Article_No","Marketplace"], keep="last")
+    return result.reset_index(drop=True)
 
 
 # ── Inventory File ────────────────────────────────────────────────────────────
@@ -500,21 +548,24 @@ def run_audit(
     inv = inv_df.set_index("EAN")["Inv_Stock"].to_dict() if not inv_df.empty else {}
 
     # ── Special request index: (Article_No, MP_UPPER) → status ─────────────
+    # load_special_request already returns long format: Article_No, Marketplace, Status
+    # Marketplace values are already uppercase from the loader.
+    # INACTIVE takes priority over ACTIVE for same article+MP.
     sp_idx: dict = {}
     if not special_df.empty:
         for _, row in special_df.iterrows():
             key = (row["Article_No"], row["Marketplace"])
-            sp_idx[key] = row["Status"]
-            if row["Marketplace"] == "ALL":
-                for mp in MARKETPLACES:
-                    sp_idx[(row["Article_No"], mp.upper())] = row["Status"]
+            # Only set if not already INACTIVE (INACTIVE always wins)
+            if sp_idx.get(key) != "INACTIVE":
+                sp_idx[key] = row["Status"]
 
     results_listing    = []
     results_status     = []
     results_stock      = []
     results_missing    = []
 
-    for mp in MARKETPLACES:
+    region_mps = REGION_MARKETPLACES.get(region, MARKETPLACES)
+    for mp in region_mps:
         mp_df = mp_dfs.get(mp, pd.DataFrame())
         mp_idx: dict = {}   # EAN → row
         if not mp_df.empty:
@@ -830,7 +881,7 @@ def build_excel(all_results: dict, regions_run: list) -> bytes:
 
         r = 4
         for region in regions_run:
-            for mp in MARKETPLACES:
+            for mp in REGION_MARKETPLACES.get(region, MARKETPLACES):
                 la_rm  = la[(la["Region"]==region)&(la["Marketplace"]==mp)]
                 sv_rm  = sv[(sv["Region"]==region)&(sv["Marketplace"]==mp)]
                 stk_rm = stk[(stk["Region"]==region)&(stk["Marketplace"]==mp)]
@@ -904,14 +955,14 @@ with tab_help:
 |---|---|---|
 | Content Master | All regions | Color_No (Article), EAN, Size |
 | ZeCom Tracker | Per region | PIM Article#, LAZADA, SHOPEE, ZALORA, TIK TOK, Launch Dates |
-| Special Request | Per region | Article No, Marketplace, Status (Active/Inactive) |
+| Special Request | Per region | Article No, Active On (MP names), Inactive On (MP names) |
 | Inventory PH (`Inventory_*`) | Per region | EAN, **Avail_Qty** |
 | Inventory MY (`PUMA_MY_B2C_Channel_Inventory_*`) | Per region | EAN, **QtyAvailable** |
 | Inventory SG (`SG_PUMA SG B2C Inventory*`) | Per region | EAN, **QTY** |
 | Lazada | Per region | Sheet=template, SellerSKU, status, Quantity, Product ID |
 | Shopee | Per region | SKU, Status, Stock, Product ID |
 | Zalora | Per region (2 files) | SellerSku, Status / Quantity |
-| TikTok | Per region | Seller sku, Status, Quantity, Product ID |
+| TikTok | **MY only** | Seller sku, Status, Quantity, Product ID |
 
 ## 📦 Stock Buffer
 - **PH × Lazada only**: Expected Stock = Inventory − 1 (min 0)
@@ -1165,7 +1216,7 @@ with tab_results:
         st.markdown("### 📋 Region × Marketplace Breakdown")
         brows = []
         for region in regions_run:
-            for mp in MARKETPLACES:
+            for mp in REGION_MARKETPLACES.get(region, MARKETPLACES):
                 la_rm  = la[(la["Region"]==region)&(la["Marketplace"]==mp)]
                 sv_rm  = sv[(sv["Region"]==region)&(sv["Marketplace"]==mp)]
                 stk_rm = stk[(stk["Region"]==region)&(stk["Marketplace"]==mp)]

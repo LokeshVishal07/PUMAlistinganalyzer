@@ -232,6 +232,7 @@ def _num_col(df, col) -> pd.Series:
 # FILE LOADERS
 # ══════════════════════════════════════════════════════════════════════════════
 
+@st.cache_data(show_spinner=False)
 def load_content(file) -> pd.DataFrame:
     df = read_file(file, sheet_name="content")
     if df.empty:
@@ -251,6 +252,7 @@ def load_content(file) -> pd.DataFrame:
     return df[["Article_No","EAN","Size"]].drop_duplicates("EAN").reset_index(drop=True)
 
 
+@st.cache_data(show_spinner=False)
 def load_zecom(file) -> pd.DataFrame:
     df = pd.DataFrame()
     for sh in ["PH","MY","SG","Sheet1","Sheet","Data",0]:

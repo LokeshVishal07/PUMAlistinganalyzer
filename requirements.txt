@@ -1,8 +1,8 @@
-streamlit>=1.35.0,<2.0.0
-pandas>=2.0.0
+streamlit==1.35.0
+pandas==2.2.2
 openpyxl==3.1.5
-xlrd==2.0.1
 xlsxwriter==3.2.9
-numpy>=1.26.0
-pyxlsb>=1.0.10
-odfpy>=1.4.1
+numpy==1.26.4
+xlrd==2.0.1
+pyxlsb==1.0.10
+odfpy==1.4.1

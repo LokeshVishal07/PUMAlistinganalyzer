@@ -813,7 +813,7 @@ with tab_upload:
                 )
 
     st.markdown("---")
-    run_btn = st.button("Run Audit", type="primary", width="stretch")
+    run_btn = st.button("Run Audit", type="primary", use_container_width=True)
 
     if run_btn:
         errors = []
@@ -973,7 +973,7 @@ with tab_results:
                     "Status FAIL":   _sc(sv_rm,"Result","FAIL"),
                     "Stock FAIL":    _sc(sk_rm,"Result","FAIL"),
                 })
-        st.dataframe(pd.DataFrame(brows), width="stretch", hide_index=True)
+        st.dataframe(pd.DataFrame(brows), use_container_width=True, hide_index=True)
 
         st.markdown("### Drilldown")
         t1, t2, t3, t4 = st.tabs([
@@ -1000,25 +1000,25 @@ with tab_results:
         with t1:
             fla = drilldown_filters("la", la)
             st.caption(f"{len(fla):,} records")
-            st.dataframe(fla, width="stretch", height=400)
+            st.dataframe(fla, use_container_width=True, height=400)
         with t2:
             fsv = drilldown_filters("sv", sv)
             rf2 = st.multiselect("Result", ["PASS","FAIL"], default=["PASS","FAIL"], key="sv_res")
             if not fsv.empty and "Result" in fsv.columns:
                 fsv = fsv[fsv["Result"].isin(rf2)]
             st.caption(f"{len(fsv):,} records")
-            st.dataframe(fsv, width="stretch", height=400)
+            st.dataframe(fsv, use_container_width=True, height=400)
         with t3:
             fstk = drilldown_filters("stk", stk)
             rf3  = st.multiselect("Result", ["PASS","FAIL"], default=["PASS","FAIL"], key="stk_res")
             if not fstk.empty and "Result" in fstk.columns:
                 fstk = fstk[fstk["Result"].isin(rf3)]
             st.caption(f"{len(fstk):,} records")
-            st.dataframe(fstk, width="stretch", height=400)
+            st.dataframe(fstk, use_container_width=True, height=400)
         with t4:
             fmv = drilldown_filters("mv", mv)
             st.caption(f"{len(fmv):,} missing variants")
-            st.dataframe(fmv, width="stretch", height=400)
+            st.dataframe(fmv, use_container_width=True, height=400)
 
         st.markdown("---")
         st.markdown("### Download Full Report")
@@ -1028,7 +1028,7 @@ with tab_results:
         st.download_button(
             "Download Audit Report (.xlsx)", data=xlsx, file_name=fname,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            width="stretch", type="primary"
+            use_container_width=True, type="primary"
         )
 
 # ── DEBUG ─────────────────────────────────────────────────────────────────────
@@ -1039,7 +1039,7 @@ with tab_debug:
         for region, info in dbg.items():
             st.markdown(f"**{region}**")
             st.dataframe(pd.DataFrame([{"Field":k,"Value":str(v)} for k,v in info.items()]),
-                         width="stretch", hide_index=True)
+                         use_container_width=True, hide_index=True)
     else:
         st.info("Run audit first.")
     st.markdown("### Run Log")

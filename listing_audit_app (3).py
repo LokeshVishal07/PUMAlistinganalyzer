@@ -686,9 +686,22 @@ def build_excel(all_results: dict, regions_run: list) -> bytes:
 # ══════════════════════════════════════════════════════════════════════════════
 # SESSION STATE
 # ══════════════════════════════════════════════════════════════════════════════
-for k in ("audit_results", "inv_debug", "run_log", "regions_run"):
-    if k not in st.session_state:
-        st.session_state[k] = {} if k not in ("run_log", "regions_run") else []
+try:
+    _ = st.session_state["audit_results"]
+except (KeyError, AttributeError):
+    st.session_state["audit_results"] = {}
+try:
+    _ = st.session_state["inv_debug"]
+except (KeyError, AttributeError):
+    st.session_state["inv_debug"] = {}
+try:
+    _ = st.session_state["run_log"]
+except (KeyError, AttributeError):
+    st.session_state["run_log"] = []
+try:
+    _ = st.session_state["regions_run"]
+except (KeyError, AttributeError):
+    st.session_state["regions_run"] = []
 
 # ══════════════════════════════════════════════════════════════════════════════
 # UI
@@ -927,7 +940,7 @@ with tab_results:
     if not results:
         st.info("Run the audit first.")
     else:
-        regions_run = st.session_state.get("regions_run", list(results.keys()))
+        regions_run = st.session_state["regions_run"] if "regions_run" in st.session_state else list(results.keys())
         la  = pd.concat([r["listing_analysis"]  for r in results.values()], ignore_index=True)
         sv  = pd.concat([r["status_validation"] for r in results.values()], ignore_index=True)
         stk = pd.concat([r["stock_validation"]  for r in results.values()], ignore_index=True)

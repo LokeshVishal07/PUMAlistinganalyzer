@@ -905,9 +905,11 @@ with tab_upload:
                     prog.progress(min(step, 95))
                     continue
 
-                prog.progress(min(step + step_sz // 2, 95), text=f"[{region}] Auditing...")
-                with st.spinner(f"[{region}] Running audit..."):
-                    region_result = run_audit(mp_dfs, inv_df, zecom_df, content_df, special_df, region)
+                prog.progress(min(step + step_sz // 2, 95), text=f"[{region}] Auditing {len(zecom_df):,} articles...")
+                status_placeholder = st.empty()
+                status_placeholder.info(f"[{region}] Running audit on {len(zecom_df):,} articles across {list(mp_dfs.keys())}. This may take 1-2 minutes for large files...")
+                region_result = run_audit(mp_dfs, inv_df, zecom_df, content_df, special_df, region)
+                status_placeholder.empty()
 
                 all_results[region] = region_result
                 la = region_result["listing_analysis"]

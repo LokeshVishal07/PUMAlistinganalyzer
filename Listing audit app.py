@@ -915,12 +915,22 @@ with tab_upload:
         help="Each region needs its own ZeCom, Inventory, TC, Product Master, and MP files."
     )
 
-    st.markdown("### Step 2 — Master File *(shared across all regions)*")
-    content_file = st.file_uploader(
-        "📦 Content Master File **[required]**",
-        type=FILE_TYPES, key="content",
-        help="Sheet: content | Cols: Color_No, EAN, Size No."
-    )
+    st.markdown("### Step 2 — Master Files *(shared across all regions)*")
+    mc1, mc2 = st.columns(2)
+    with mc1:
+        content_file = st.file_uploader(
+            "📦 Content Master File **[required]**",
+            type=FILE_TYPES, key="content",
+            help="Sheet: content | Cols: Color_No, EAN, Size No."
+        )
+    with mc2:
+        product_master_file = st.file_uploader(
+            "🔵 GRAAS Product Master **[required]** *(all regions)*",
+            type=FILE_TYPES, key="product_master_global",
+            help="Single file covering PH + MY + SG | EAN: sellerSKU | "
+                 "Cols: MyStock-PH quantity, MyStock-YCH-MY quantity, MyStock-YCH-SG quantity "
+                 "+ reservedQuantity + occupiedQuantity per region"
+        )
 
     st.markdown("### Step 3 — Region Files")
     region_files: dict = {}
@@ -945,21 +955,13 @@ with tab_upload:
                     help="Cols: Article No | Active On | Inactive On"
                 )
 
-            # Inventory + Product Master
-            st.markdown(f"**{region} — Inventory & Product Master**")
-            c1, c2 = st.columns(2)
-            with c1:
-                region_files[region]["inventory"] = st.file_uploader(
-                    f"📦 Seller Inventory ({region})",
-                    type=FILE_TYPES, key=f"inv_{region}",
-                    help="PH: Avail_Qty | MY: QtyAvailable | SG: QTY"
-                )
-            with c2:
-                region_files[region]["product_master"] = st.file_uploader(
-                    f"🔵 GRAAS Product Master ({region}) **[required]**",
-                    type=FILE_TYPES, key=f"pm_{region}",
-                    help=f"EAN: sellerSKU | Stock: MyStock-{region} quantity/reservedQuantity/occupiedQuantity"
-                )
+            # Inventory
+            st.markdown(f"**{region} — Seller Inventory**")
+            region_files[region]["inventory"] = st.file_uploader(
+                f"📦 Seller Inventory ({region})",
+                type=FILE_TYPES, key=f"inv_{region}",
+                help="PH: Avail_Qty | MY: QtyAvailable | SG: QTY"
+            )
 
             # Marketplace files
             st.markdown(f"**{region} — Marketplace Files (Seller Center)**")
@@ -1022,11 +1024,11 @@ with tab_upload:
         errors = []
         if not content_file:       errors.append("Content Master file is required.")
         if not selected_regions:   errors.append("Select at least one region.")
+        if not product_master_file:
+            errors.append("GRAAS Product Master file is required (Step 2).")
         for rg in selected_regions:
             if not region_files.get(rg,{}).get("zecom"):
                 errors.append(f"[{rg}] ZeCom Tracker is required.")
-            if not region_files.get(rg,{}).get("product_master"):
-                errors.append(f"[{rg}] GRAAS Product Master is required.")
         for e in errors: st.error(e)
 
         if not errors:
@@ -1072,10 +1074,10 @@ with tab_upload:
                 else:
                     st.warning(f"[{region}] No Seller Inventory — stock = 0")
 
-                # Product Master
-                with st.spinner(f"[{region}] Product Master…"):
-                    pm_df = load_product_master(rf["product_master"], region)
-                st.write(f"  Product Master: **{len(pm_df):,}** EANs | "
+                # Product Master (global file, load per region using region-specific columns)
+                with st.spinner(f"[{region}] Product Master ({region} columns)…"):
+                    pm_df = load_product_master(product_master_file, region)
+                st.write(f"  Product Master [{region}]: **{len(pm_df):,}** EANs | "
                          f"non-zero qty=**{int((pm_df['PM_Quantity']>0).sum()):,}**")
 
                 # TC Marketplace files

@@ -686,9 +686,9 @@ def build_excel(all_results: dict, regions_run: list) -> bytes:
 # ══════════════════════════════════════════════════════════════════════════════
 # SESSION STATE
 # ══════════════════════════════════════════════════════════════════════════════
-for k in ("audit_results", "inv_debug", "run_log"):
+for k in ("audit_results", "inv_debug", "run_log", "regions_run"):
     if k not in st.session_state:
-        st.session_state[k] = {} if k != "run_log" else []
+        st.session_state[k] = {} if k not in ("run_log", "regions_run") else []
 
 # ══════════════════════════════════════════════════════════════════════════════
 # UI
@@ -914,16 +914,16 @@ with tab_upload:
                 prog.progress(min(step, 95))
 
             prog.progress(100, text="Complete!")
-            st.session_state.audit_results = all_results
-            st.session_state.inv_debug     = inv_debug_all
-            st.session_state.run_log       = run_log
-            st.session_state.regions_run   = selected_regions
+            st.session_state["audit_results"] = all_results
+            st.session_state["inv_debug"]     = inv_debug_all
+            st.session_state["run_log"]       = run_log
+            st.session_state["regions_run"]   = selected_regions
             if all_results:
                 st.success("Audit complete! Go to Results & Download tab.")
 
 # ── RESULTS ──────────────────────────────────────────────────────────────────
 with tab_results:
-    results = st.session_state.audit_results
+    results = st.session_state["audit_results"]
     if not results:
         st.info("Run the audit first.")
     else:
@@ -1034,7 +1034,7 @@ with tab_results:
 # ── DEBUG ─────────────────────────────────────────────────────────────────────
 with tab_debug:
     st.markdown("### Inventory Debug")
-    dbg = st.session_state.inv_debug
+    dbg = st.session_state["inv_debug"]
     if dbg:
         for region, info in dbg.items():
             st.markdown(f"**{region}**")
@@ -1043,7 +1043,7 @@ with tab_debug:
     else:
         st.info("Run audit first.")
     st.markdown("### Run Log")
-    log = st.session_state.run_log
+    log = st.session_state["run_log"]
     if log:
         for line in log: st.text(line)
     else:

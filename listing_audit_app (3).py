@@ -973,7 +973,7 @@ with tab_results:
                     "Status FAIL":   _sc(sv_rm,"Result","FAIL"),
                     "Stock FAIL":    _sc(sk_rm,"Result","FAIL"),
                 })
-        st.dataframe(pd.DataFrame(brows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(brows), use_container_width=True)
 
         st.markdown("### Drilldown")
         t1, t2, t3, t4 = st.tabs([
@@ -1039,7 +1039,7 @@ with tab_debug:
         for region, info in dbg.items():
             st.markdown(f"**{region}**")
             st.dataframe(pd.DataFrame([{"Field":k,"Value":str(v)} for k,v in info.items()]),
-                         use_container_width=True, hide_index=True)
+                         use_container_width=True)
     else:
         st.info("Run audit first.")
     st.markdown("### Run Log")
